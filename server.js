@@ -10,11 +10,13 @@ const RUNS = path.join(ROOT, "runs");
 const CURRENT = path.join(RUNS, "current-run.txt");
 const GLOBAL_FEEDBACK = path.join(RUNS, "global-feedback.jsonl");
 const THUMBS = path.join(RUNS, ".thumbs");
+const VALIDATIONS = path.join(RUNS, "validations");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 
 fs.mkdirSync(RUNS, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
+fs.mkdirSync(VALIDATIONS, { recursive: true });
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -178,7 +180,7 @@ function readState(runId) {
 
 function listRuns() {
   return fs.readdirSync(RUNS, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
+    .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "validations")
     .map((d) => {
       const state = readState(d.name);
       return {
@@ -193,6 +195,83 @@ function listRuns() {
       const bt = Date.parse(b.updated_at || "") || 0;
       return bt - at || String(b.run_id).localeCompare(String(a.run_id));
     });
+}
+
+function validationDirs() {
+  return fs.readdirSync(VALIDATIONS, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(VALIDATIONS, entry.name))
+    .sort((a, b) => String(path.basename(b)).localeCompare(String(path.basename(a))));
+}
+
+function validationState(dir) {
+  const state = readJsonFile(path.join(dir, "state.json"), {});
+  const notes = readJsonLines(path.join(dir, "notes.jsonl"));
+  const noteMap = notes.reduce((map, note) => {
+    if (note.anomaly_id) map[note.anomaly_id] = note;
+    return map;
+  }, {});
+  state.notes = notes;
+  state.anomalies = (state.anomalies || []).map((item) => ({ ...item, saved_note: noteMap[item.id] || null }));
+  return state;
+}
+
+function validationPayload() {
+  const dirs = validationDirs();
+  return {
+    validations: dirs.map((dir) => {
+      const state = validationState(dir);
+      return {
+        validation_id: path.basename(dir),
+        status: state.status || "unknown",
+        started_at: state.started_at || null,
+        updated_at: state.updated_at || null,
+        finished_at: state.finished_at || null,
+        metrics: state.metrics || {},
+        summary: state.summary || "",
+      };
+    }),
+    latest: dirs[0] ? validationState(dirs[0]) : null,
+  };
+}
+
+function startValidation(req, res) {
+  const python = process.env.PYTHON || "python3";
+  const validationId = `${stamp()}-validation`;
+  const dir = path.join(VALIDATIONS, validationId);
+  fs.mkdirSync(dir, { recursive: true });
+  const env = { ...process.env };
+  env.PYTHONPATH = SBA_SRC + (env.PYTHONPATH ? `:${env.PYTHONPATH}` : "");
+  const child = spawn(python, [path.join(ROOT, "validator.py"), "--validation-id", validationId], {
+    cwd: ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const log = path.join(VALIDATIONS, "validation-spawn.log");
+  fs.appendFileSync(log, `\n[start] pid=${child.pid} validation=${validationId} at=${new Date().toISOString()}\n`);
+  child.stdout.on("data", (chunk) => fs.appendFileSync(log, chunk));
+  child.stderr.on("data", (chunk) => fs.appendFileSync(log, chunk));
+  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, validation_id: validationId, started_at: new Date().toISOString() }, null, 2) + "\n");
+  child.on("exit", (code, signal) => {
+    fs.appendFileSync(log, `[exit] pid=${child.pid} code=${code} signal=${signal}\n`);
+  });
+  json(res, 202, { ok: true, validation_id: validationId, pid: child.pid });
+}
+
+async function saveValidationNote(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const validationId = String(payload.validation_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const dir = path.join(VALIDATIONS, validationId);
+  if (!validationId || !dir.startsWith(VALIDATIONS) || !fs.existsSync(dir)) return json(res, 404, { error: "unknown validation" });
+  const note = {
+    at: new Date().toISOString(),
+    validation_id: validationId,
+    anomaly_id: String(payload.anomaly_id || ""),
+    status: payload.status || "saved",
+    note: payload.note || "",
+  };
+  fs.appendFileSync(path.join(dir, "notes.jsonl"), JSON.stringify(note) + "\n");
+  json(res, 200, { ok: true, note });
 }
 
 function secondsBetween(a, b) {
@@ -671,6 +750,9 @@ async function api(req, res, url) {
   if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
   if (url.pathname === "/api/stats") return json(res, 200, stats());
   if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
+  if (url.pathname === "/api/validation") return json(res, 200, validationPayload());
+  if (url.pathname === "/api/validation/start") return startValidation(req, res);
+  if (url.pathname === "/api/validation/save") return saveValidationNote(req, res);
   if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
   if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);
   if (url.pathname === "/api/start") return startRun(req, res, url);

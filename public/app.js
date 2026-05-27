@@ -20,6 +20,7 @@ let pendingStatsRender = null;
 let activityEvents = [];
 let activityRuns = [];
 let activityUpdatedAt = null;
+let latestValidation = null;
 
 function loadFeedbackConsole() {
   try {
@@ -778,6 +779,107 @@ async function pollActivity() {
   } catch {}
 }
 
+function renderValidation(validation) {
+  latestValidation = validation;
+  const panel = $("validationPanel");
+  if (!panel) return;
+  const latest = validation?.latest || null;
+  const rows = latest?.anomalies || [];
+  $("validationStatus").textContent = latest ? `${latest.status || "unknown"} · ${rows.length} anomalies` : "not started";
+  if (!latest) {
+    panel.innerHTML = `<div class="message">Run validation agent to scan extracted values for missing counts, sign/magnitude outliers, station pairing issues, and other review-worthy abnormalities.</div>`;
+    return;
+  }
+  const metrics = latest.metrics || {};
+  panel.innerHTML = `<div class="validation-summary">
+    <div class="stat-card"><span>Structures</span><strong>${metrics.structures ?? "--"}</strong><small>latest extracted runs</small></div>
+    <div class="stat-card"><span>Readings</span><strong>${metrics.readings ?? "--"}</strong><small>values reviewed</small></div>
+    <div class="stat-card"><span>Anomalies</span><strong>${rows.length}</strong><small><mark class="bad">${metrics.high || 0} high</mark> <mark class="hot">${metrics.medium || 0} med</mark> <mark>${metrics.low || 0} low</mark></small></div>
+    <div class="stat-card"><span>Accuracy proxy</span><strong>${metrics.review_accuracy_proxy_percent ?? "--"}%</strong><small>anomaly-density estimate</small></div>
+  </div>
+  ${latest.summary ? `<div class="validation-note">${escapeHtml(latest.summary)}</div>` : ""}
+  <div class="validation-agents">${Object.values(latest.agents || {}).map((agent) => `<div class="validation-agent ${cls(agent.status)}">
+    ${statusDot(agent.status)}<strong>${escapeHtml(agent.name || "")}</strong><span>${escapeHtml(agent.message || "")}</span>
+  </div>`).join("")}</div>
+  <div class="validation-list">${rows.length ? rows.map((item) => renderAnomalyCard(latest.validation_id, item)).join("") : `<div class="message">No anomaly cards yet. If the validation is running, cards will appear when the reviewer finishes.</div>`}</div>`;
+}
+
+function renderAnomalyCard(validationId, item) {
+  const evidence = item.evidence || [];
+  return `<article class="anomaly-card ${escapeHtml(item.severity || "medium")}" data-anomaly-id="${escapeHtml(item.id || "")}">
+    <div class="anomaly-head">
+      <div>
+        <strong>${escapeHtml(item.title || "Validation anomaly")}</strong>
+        <div class="message">${escapeHtml(item.why || "")}</div>
+      </div>
+      <div class="anomaly-tags">
+        <mark class="${escapeHtml(item.severity || "medium")}">${escapeHtml(item.severity || "medium")}</mark>
+        <mark>${escapeHtml(item.kind || "review")}</mark>
+        <mark>conf ${Math.round(Number(item.confidence || 0) * 100)}%</mark>
+      </div>
+    </div>
+    <div class="anomaly-evidence">${evidence.map(renderAnomalyEvidence).join("")}</div>
+    <div class="anomaly-actions">
+      <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(item.saved_note?.note || "")}" />
+      <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved" : "Save"}</button>
+      <button class="small-btn mark-reviewed" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Mark reviewed</button>
+    </div>
+  </article>`;
+}
+
+function renderAnomalyEvidence(item) {
+  const folder = knownStructures.find((entry) => String(entry.structure) === String(item.structure))?.folder || "";
+  const image = item.source_image || "";
+  const href = folder && image ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(image)}?size=760` : "";
+  return `<div class="anomaly-chip">
+    <strong>STR ${escapeHtml(item.structure || "?")}</strong>
+    <span>${escapeHtml(item.agent || "")}</span>
+    <mark>${escapeHtml(item.value ?? "")}</mark>
+    ${image ? `<small>${escapeHtml(image)}</small>` : ""}
+    ${href ? `<div class="anomaly-hover"><img src="${href}" alt="${escapeHtml(image)}" loading="lazy" decoding="async" /></div>` : ""}
+  </div>`;
+}
+
+async function pollValidation() {
+  try {
+    const res = await fetch("/api/validation", { cache: "no-store" });
+    if (!res.ok) return;
+    renderValidation(await res.json());
+  } catch {}
+}
+
+async function startValidation() {
+  const button = $("startValidationBtn");
+  button.disabled = true;
+  button.textContent = "Starting validation";
+  await fetch("/api/validation/start", { method: "POST" });
+  setTimeout(() => {
+    button.disabled = false;
+    button.textContent = "Run validation agent";
+  }, 1400);
+  pollValidation();
+}
+
+async function saveAnomaly(button, status = "saved") {
+  const card = button.closest(".anomaly-card");
+  const note = card?.querySelector(".anomaly-note-input")?.value || "";
+  const payload = {
+    validation_id: button.dataset.validationId,
+    anomaly_id: button.dataset.anomalyId,
+    status,
+    note,
+  };
+  const res = await fetch("/api/validation/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    button.textContent = status === "reviewed" ? "Reviewed" : "Saved";
+    pollValidation();
+  }
+}
+
 function persistFeedbackConsole() {
   localStorage.setItem("subagentFeedbackConsole", JSON.stringify(feedbackConsoleItems.slice(-150)));
 }
@@ -1094,6 +1196,7 @@ function escapeHtml(value) {
 }
 
 $("startBtn").addEventListener("click", startRun);
+$("startValidationBtn")?.addEventListener("click", startValidation);
 $("structurePickerBtn").addEventListener("click", () => {
   $("structurePicker").hidden = !$("structurePicker").hidden;
 });
@@ -1143,6 +1246,10 @@ document.addEventListener("click", (event) => {
     feedbackConsoleCollapsed = !feedbackConsoleCollapsed;
     renderFeedbackConsole();
   }
+  const save = event.target.closest(".save-anomaly");
+  if (save) saveAnomaly(save, "saved");
+  const reviewed = event.target.closest(".mark-reviewed");
+  if (reviewed) saveAnomaly(reviewed, "reviewed");
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
@@ -1241,8 +1348,10 @@ loadStructures();
 renderFeedbackConsole();
 poll();
 pollActivity();
+pollValidation();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
+setInterval(pollValidation, 2500);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
 }, 500);
