@@ -13,6 +13,10 @@ const manualOpenRunIds = new Set();
 let lastRailIndex = null;
 let latestStats = null;
 let feedbackConsoleCollapsed = false;
+let scrollablePanelQuietUntil = 0;
+let pendingRailRender = false;
+let pendingLauncherRender = false;
+let pendingStatsRender = null;
 
 function loadFeedbackConsole() {
   try {
@@ -372,6 +376,11 @@ function renderStepCards(steps) {
 }
 
 function renderLauncher() {
+  const panel = $("reportLauncher");
+  if (scrollablePanelBusy() && panel?.innerHTML.trim()) {
+    pendingLauncherRender = true;
+    return;
+  }
   const scrollSnapshot = captureScrollPositions("#reportLauncher");
   const latestByStructure = new Map();
   for (const run of knownRuns) {
@@ -428,9 +437,22 @@ function restoreScrollPositions(snapshot) {
   });
 }
 
+function scrollablePanelBusy() {
+  return Date.now() < scrollablePanelQuietUntil;
+}
+
+function markScrollablePanelBusy(event) {
+  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list")) return;
+  scrollablePanelQuietUntil = Date.now() + 700;
+}
+
 function renderFoldRail() {
   const rail = $("foldRail");
   if (!rail) return;
+  if (scrollablePanelBusy() && rail.querySelector(".rail-list")) {
+    pendingRailRender = true;
+    return;
+  }
   const scrollSnapshot = captureScrollPositions("#foldRail .rail-list");
   const latest = latestRunMap();
   const visible = new Set(visibleRunIds());
@@ -626,6 +648,10 @@ async function submitChipFeedback(chip, value) {
 function renderStats(stats) {
   latestStats = stats;
   $("statsUpdated").textContent = `updated ${fmtTime(stats.updated_at)}`;
+  if (scrollablePanelBusy() && $("statsPanel")?.innerHTML.trim()) {
+    pendingStatsRender = stats;
+    return;
+  }
   const scrollSnapshot = captureScrollPositions("#statsPanel .health-list");
   const statuses = stats.statuses || {};
   $("statsPanel").innerHTML = `<div class="stat-cards">
@@ -989,8 +1015,27 @@ setInterval(poll, 600);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
 }, 500);
+setInterval(() => {
+  if (scrollablePanelBusy()) return;
+  if (pendingRailRender) {
+    pendingRailRender = false;
+    renderFoldRail();
+  }
+  if (pendingLauncherRender) {
+    pendingLauncherRender = false;
+    renderLauncher();
+  }
+  if (pendingStatsRender) {
+    const stats = pendingStatsRender;
+    pendingStatsRender = null;
+    renderStats(stats);
+  }
+}, 250);
 ["scroll", "pointerdown", "wheel", "keydown"].forEach((eventName) => {
   window.addEventListener(eventName, () => {
     deferRenderUntil = Date.now() + 1200;
   }, { passive: true });
 });
+document.addEventListener("wheel", markScrollablePanelBusy, { passive: true });
+document.addEventListener("pointerdown", markScrollablePanelBusy, { passive: true });
+document.addEventListener("scroll", markScrollablePanelBusy, { passive: true, capture: true });
