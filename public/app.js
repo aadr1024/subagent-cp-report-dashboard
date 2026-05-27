@@ -183,12 +183,110 @@ function renderReadingChip(reading, images, runId, agent, folderName, readings) 
   </div>`;
 }
 
+function tableDisplayName(agentKey) {
+  if (agentKey === "table4-stations") return "Table 4";
+  if (agentKey === "table5-currents") return "Table 5";
+  if (agentKey === "table6-potentials") return "Table 6";
+  return agentKey;
+}
+
+function normalizedStationLabel(value, fallbackWord = "Station", allowRaw = true) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  let match = text.match(/(?:test\s*)?station\s*#?\s*(\d+)/i) || text.match(/\bts\s*#?\s*(\d+)/i);
+  if (match) return `${fallbackWord} ${match[1]}`;
+  match = text.match(/\b(?:anode|mg)\s*#?\s*(\d+)/i);
+  if (match) return `Anode ${match[1]}`;
+  match = text.match(/^#?\s*(\d+)$/);
+  if (match) return `${fallbackWord} ${match[1]}`;
+  if (!allowRaw) return "";
+  return text.replaceAll("_", " ").replace(/\s+/g, " ");
+}
+
+function stationLabelForReading(reading, agentKey) {
+  const fallbackWord = agentKey === "table4-stations" ? "Station" : "Anode";
+  for (const candidate of [reading.station, reading.test_station, reading.mg]) {
+    const label = normalizedStationLabel(candidate, fallbackWord, true);
+    if (label && !/^table\s+\d+$/i.test(label)) return label;
+  }
+  for (const candidate of [reading.annotation_label, reading.row_name]) {
+    const label = normalizedStationLabel(candidate, fallbackWord, false);
+    if (label && !/^table\s+\d+$/i.test(label)) return label;
+  }
+  return "";
+}
+
+function sourceOrder(reading, index) {
+  const explicit = Number(reading.sequence_index);
+  if (Number.isFinite(explicit)) return explicit;
+  const numbers = String(reading.source_image || "").match(/\d+/g);
+  if (numbers?.length) return Number(numbers[numbers.length - 1]);
+  return index;
+}
+
+function imageProximityGroups(readings, agentKey) {
+  const ordered = readings
+    .map((reading, index) => ({ reading, index, order: sourceOrder(reading, index) }))
+    .sort((a, b) => a.order - b.order || a.index - b.index);
+  if (ordered.length < 4) return [{ title: "", readings }];
+  const gaps = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    gaps.push({ index, gap: ordered[index].order - ordered[index - 1].order });
+  }
+  const largest = gaps.sort((a, b) => b.gap - a.gap)[0];
+  if (!largest || largest.gap < 3) return [{ title: "", readings }];
+  const table = tableDisplayName(agentKey);
+  return [
+    { title: `${table} · local group 1`, readings: ordered.slice(0, largest.index).map((item) => item.reading) },
+    { title: `${table} · local group 2`, readings: ordered.slice(largest.index).map((item) => item.reading) },
+  ].filter((group) => group.readings.length);
+}
+
+function displayGroupsForReadings(agentKey, readings) {
+  if (!["table4-stations", "table5-currents", "table6-potentials"].includes(agentKey)) {
+    return [{ title: "", readings }];
+  }
+  const table = tableDisplayName(agentKey);
+  const groups = new Map();
+  let labeled = 0;
+  for (const reading of readings) {
+    const station = stationLabelForReading(reading, agentKey);
+    if (station) labeled += 1;
+    const key = station || "__unlabeled__";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(reading);
+  }
+  if (labeled >= Math.max(1, Math.ceil(readings.length / 2))) {
+    return [...groups.entries()]
+      .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+      .map(([station, items]) => ({
+        title: station === "__unlabeled__" ? `${table} · unlabeled local group` : `${table} · ${station}`,
+        readings: items,
+      }));
+  }
+  return imageProximityGroups(readings, agentKey);
+}
+
+function renderReadingGroups(agentKey, readings, images, runId, folderName) {
+  const groups = displayGroupsForReadings(agentKey, readings);
+  if (groups.length === 1 && !groups[0].title) {
+    return readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings)).join("");
+  }
+  return groups.map((group) => `<section class="reading-group">
+    <div class="reading-group-head">
+      <strong>${escapeHtml(group.title)}</strong>
+      <small>${group.readings.length} value${group.readings.length === 1 ? "" : "s"}</small>
+    </div>
+    <div class="reading-group-values">${group.readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings)).join("")}</div>
+  </section>`).join("");
+}
+
 function renderLeaf(agentKey, agent, runId, folderName) {
   const readings = Array.isArray(agent.readings) ? agent.readings : [];
   const images = Array.isArray(agent.image_refs) ? agent.image_refs : [];
   const unresolved = Array.isArray(agent.unresolved) ? agent.unresolved : [];
   const values = readings.length
-    ? readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings)).join("")
+    ? renderReadingGroups(agentKey, readings, images, runId, folderName)
     : `<div class="message">Values pending. Source packet visible below when prepared.</div>`;
   const feedback = Array.isArray(agent.feedback) ? agent.feedback : [];
   const prompt = agent.prompt_summary ? `<div class="prompt-box">${escapeHtml(agent.prompt_summary)}</div>` : "";

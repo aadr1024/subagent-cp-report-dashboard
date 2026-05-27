@@ -867,6 +867,41 @@ main {
   margin-top: 10px;
 }
 
+.reading-group {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(217, 209, 194, 0.82);
+  border-left: 4px solid rgba(30, 99, 143, 0.34);
+  border-radius: 12px;
+  background: rgba(255, 253, 247, 0.62);
+}
+
+.reading-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.reading-group-head small {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(109, 106, 102, 0.1);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.reading-group-values {
+  display: grid;
+  gap: 6px;
+}
+
 .reading-chip {
   position: relative;
   padding: 9px;
