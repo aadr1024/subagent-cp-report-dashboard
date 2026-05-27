@@ -372,6 +372,7 @@ function renderStepCards(steps) {
 }
 
 function renderLauncher() {
+  const scrollSnapshot = captureScrollPositions("#reportLauncher");
   const latestByStructure = new Map();
   for (const run of knownRuns) {
     const key = String(run.structure);
@@ -394,6 +395,7 @@ function renderLauncher() {
         </article>`;
       }).join("")}</div>`
     : `<div class="message">Loading report list...</div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 function latestRunMap() {
@@ -405,9 +407,31 @@ function latestRunMap() {
   return map;
 }
 
+function captureScrollPositions(selector) {
+  return [...document.querySelectorAll(selector)].map((node, index) => ({
+    selector,
+    index,
+    top: node.scrollTop,
+    left: node.scrollLeft,
+  }));
+}
+
+function restoreScrollPositions(snapshot) {
+  if (!snapshot.length) return;
+  requestAnimationFrame(() => {
+    for (const item of snapshot) {
+      const node = document.querySelectorAll(item.selector)[item.index];
+      if (!node) continue;
+      node.scrollTop = item.top;
+      node.scrollLeft = item.left;
+    }
+  });
+}
+
 function renderFoldRail() {
   const rail = $("foldRail");
   if (!rail) return;
+  const scrollSnapshot = captureScrollPositions("#foldRail .rail-list");
   const latest = latestRunMap();
   const visible = new Set(visibleRunIds());
   rail.innerHTML = `<div class="rail-head">
@@ -429,6 +453,7 @@ function renderFoldRail() {
         <small><mark class="${cls(status)}">${escapeHtml(label)}</mark></small>
       </button>`;
     }).join("")}</div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 function preserveViewport(work) {
@@ -601,6 +626,7 @@ async function submitChipFeedback(chip, value) {
 function renderStats(stats) {
   latestStats = stats;
   $("statsUpdated").textContent = `updated ${fmtTime(stats.updated_at)}`;
+  const scrollSnapshot = captureScrollPositions("#statsPanel .health-list");
   const statuses = stats.statuses || {};
   $("statsPanel").innerHTML = `<div class="stat-cards">
     <div class="stat-card"><span>Folders</span><strong>${stats.folders_total}</strong><small><mark>${stats.latest_runs_total}</mark> started</small></div>
@@ -642,6 +668,7 @@ function renderStats(stats) {
       </div>`).join("") || `<div class="message">No token calls yet.</div>`}</div>
     </div>
   </div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 function renderRunStat(run) {
