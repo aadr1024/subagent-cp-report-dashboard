@@ -151,15 +151,8 @@ function renderReadingChip(reading, images, runId, agent, folderName, readings) 
   const img = image ? artifactThumbHref(runId, image.artifact, 900) : "";
   const groupImages = evidenceGroupForReading(reading, images, readings, agent);
   const groupSources = groupImages.map((item) => item.source_image);
-  const groupBand = groupImages.length ? `<div class="used-group">
-      <div class="group-title">Used evidence group</div>
-      <div class="group-strip">${groupImages.map((item) => `<figure class="group-thumb ${item.source_image === reading.source_image ? "current" : ""}">
-        <img data-src="${artifactThumbHref(runId, item.artifact, 420)}" alt="${escapeHtml(item.source_image || "")}" decoding="async" fetchpriority="low" />
-        <figcaption>${escapeHtml(item.source_image || "")}</figcaption>
-      </figure>`).join("")}</div>
-    </div>` : "";
   const neighborhood = folderName && reading.source_image
-    ? `/api/image-neighborhood?folder=${encodeURIComponent(folderName)}&image=${encodeURIComponent(reading.source_image)}&limit=11`
+    ? `/api/image-neighborhood?folder=${encodeURIComponent(folderName)}&image=${encodeURIComponent(reading.source_image)}&limit=21`
     : "";
   const value = reading.visible_value ?? reading.value ?? "";
   const unit = reading.unit_seen || "";
@@ -183,7 +176,6 @@ function renderReadingChip(reading, images, runId, agent, folderName, readings) 
         <img data-src="${img}" alt="${escapeHtml(reading.source_image || label)}" decoding="async" fetchpriority="low" />
         <div>${escapeHtml(label)}</div>
       </div>
-      ${groupBand}
       <div class="neighbor-strip">
         <div class="neighbor-loading">hover: loading before/current/after images</div>
       </div>
@@ -1053,10 +1045,27 @@ async function hydrateHoverPreview(preview) {
     let groupSources = [];
     try { groupSources = JSON.parse(preview.dataset.groupSources || "[]"); } catch {}
     const groupSet = new Set(groupSources);
-    strip.innerHTML = (payload.images || []).map((image) => `<figure class="neighbor ${image.current ? "current" : ""}">
+    const figures = (images) => images.map((image) => `<figure class="neighbor ${image.current ? "current" : ""}">
       <img src="${escapeHtml(image.href)}" alt="${escapeHtml(image.name)}" loading="lazy" decoding="async" fetchpriority="low" />
       <figcaption>${escapeHtml(image.name)}</figcaption>
-    </figure>`).replace('class="neighbor ', `class="neighbor ${groupSet.has(image.name) ? "used " : ""}`).join("");
+    </figure>`).join("");
+    const parts = [];
+    const sourceImages = payload.images || [];
+    for (let index = 0; index < sourceImages.length; index += 1) {
+      const image = sourceImages[index];
+      if (!groupSet.has(image.name)) {
+        parts.push(figures([image]));
+        continue;
+      }
+      const group = [];
+      while (index < sourceImages.length && groupSet.has(sourceImages[index].name)) {
+        group.push(sourceImages[index]);
+        index += 1;
+      }
+      index -= 1;
+      parts.push(`<div class="neighbor-used-group">${figures(group)}</div>`);
+    }
+    strip.innerHTML = parts.join("");
     requestAnimationFrame(() => {
       const current = strip.querySelector(".neighbor.current");
       if (current) {
