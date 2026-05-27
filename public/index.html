@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Subagent Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">J260101 CP report automation</div>
+        <h1>Subagent Dashboard</h1>
+      </div>
+      <div class="controls">
+        <div class="picker">
+          <button id="structurePickerBtn" class="picker-btn" type="button">STR 192</button>
+          <div id="structurePicker" class="picker-menu" hidden>
+            <div class="picker-head">
+              <strong>Select STRs</strong>
+              <span>multi-run</span>
+            </div>
+            <div id="structureOptions" class="structure-options"></div>
+          </div>
+        </div>
+        <button id="startBtn">Start Selected</button>
+        <select id="runMode" aria-label="Run mode">
+          <option value="reuse" selected>Reuse transcription</option>
+          <option value="fresh">Fresh OpenAI calls</option>
+        </select>
+      </div>
+    </header>
+
+    <aside id="foldRail" class="fold-rail" aria-label="Structure fold rail"></aside>
+    <aside id="feedbackConsole" class="feedback-console collapsed" aria-label="Feedback console"></aside>
+
+    <main>
+      <section class="status-strip">
+        <div>
+          <span class="label">Run</span>
+          <strong id="runId">none selected</strong>
+        </div>
+        <div>
+          <span class="label">Status</span>
+          <strong id="runStatus" class="pill pending">waiting</strong>
+        </div>
+        <div>
+          <span class="label">Target</span>
+          <strong id="targetText">multi-run board</strong>
+        </div>
+        <div>
+          <span class="label">Updated</span>
+          <strong id="updatedAt">--</strong>
+        </div>
+      </section>
+
+      <section class="panel launcher-panel">
+        <div class="panel-head">
+          <h2>Speed + Health</h2>
+          <span id="statsUpdated">stats loading</span>
+        </div>
+        <div id="statsPanel" class="stats-panel"></div>
+      </section>
+
+      <section class="panel launcher-panel">
+        <div class="panel-head">
+          <h2>Report Launcher</h2>
+          <span>start or stop individual STRs</span>
+        </div>
+        <div id="reportLauncher" class="report-launcher"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Live Run Boards</h2>
+          <div class="board-tools">
+            <span id="pollState">polling</span>
+            <button class="density-btn" data-open-limit="1">1 open</button>
+            <button class="density-btn active" data-open-limit="4">4 open</button>
+            <button class="density-btn" data-open-limit="5">5 open</button>
+            <button class="density-btn" data-open-limit="all">all</button>
+          </div>
+        </div>
+        <div id="runBoards" class="run-boards"></div>
+      </section>
+
+      <section class="grid lower">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Artifacts</h2>
+            <span>durable run files</span>
+          </div>
+          <div id="artifacts" class="artifacts"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Event Stream</h2>
+            <span id="eventCount">0</span>
+          </div>
+          <div id="events" class="events"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

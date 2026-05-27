@@ -1,0 +1,503 @@
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { spawn, spawnSync } = require("child_process");
+
+const ROOT = __dirname;
+const PUBLIC = path.join(ROOT, "public");
+const RUNS = path.join(ROOT, "runs");
+const CURRENT = path.join(RUNS, "current-run.txt");
+const GLOBAL_FEEDBACK = path.join(RUNS, "global-feedback.jsonl");
+const THUMBS = path.join(RUNS, ".thumbs");
+const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
+const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
+
+fs.mkdirSync(RUNS, { recursive: true });
+fs.mkdirSync(THUMBS, { recursive: true });
+
+const mime = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+const imageExt = new Set([".jpg", ".jpeg", ".png", ".heic"]);
+
+function send(res, status, body, type = "application/json; charset=utf-8") {
+  res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
+  res.end(body);
+}
+
+function json(res, status, payload) {
+  send(res, status, JSON.stringify(payload), "application/json; charset=utf-8");
+}
+
+function runIdFromUrl(url) {
+  const requested = url.searchParams.get("run") || "current";
+  if (requested !== "current") return requested.replace(/[^a-zA-Z0-9_.-]/g, "");
+  if (!fs.existsSync(CURRENT)) return null;
+  return fs.readFileSync(CURRENT, "utf8").trim() || null;
+}
+
+function runDir(runId) {
+  if (!runId) return null;
+  const dir = path.join(RUNS, runId);
+  return dir.startsWith(RUNS) ? dir : null;
+}
+
+function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function thumbFor(sourceFile, size = 720) {
+  const source = path.resolve(sourceFile);
+  if (!fs.existsSync(source)) return null;
+  const boundedSize = Math.max(180, Math.min(1200, Number(size) || 720));
+  const stat = fs.statSync(source);
+  const key = crypto.createHash("sha1")
+    .update(`${source}:${stat.size}:${stat.mtimeMs}:${boundedSize}`)
+    .digest("hex");
+  const out = path.join(THUMBS, `${key}.jpg`);
+  if (fs.existsSync(out)) return out;
+  const tmp = `${out}.tmp`;
+  const result = spawnSync("sips", [
+    "-s", "format", "jpeg",
+    "-s", "formatOptions", "65",
+    "-Z", String(boundedSize),
+    source,
+    "--out", tmp,
+  ], { stdio: "ignore" });
+  if (result.status === 0 && fs.existsSync(tmp)) {
+    fs.renameSync(tmp, out);
+    return out;
+  }
+  try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch {}
+  return source;
+}
+
+function sendThumb(res, file, size) {
+  const thumb = thumbFor(file, size);
+  if (!thumb) return send(res, 404, "not found", "text/plain");
+  send(res, 200, fs.readFileSync(thumb), "image/jpeg");
+}
+
+function maxEventSeq(dir) {
+  const file = path.join(dir, "events.jsonl");
+  if (!fs.existsSync(file)) return 0;
+  return fs.readFileSync(file, "utf8").split(/\n+/).reduce((max, line) => {
+    if (!line.trim()) return max;
+    try { return Math.max(max, Number(JSON.parse(line).seq || 0)); } catch { return max; }
+  }, 0);
+}
+
+function appendRunEvent(runId, eventType, message, data = {}) {
+  const dir = runDir(runId);
+  if (!dir) return;
+  const at = new Date().toISOString();
+  const event = { seq: maxEventSeq(dir) + 1, at, type: eventType, message, data };
+  fs.appendFileSync(path.join(dir, "events.jsonl"), JSON.stringify(event) + "\n");
+  const stateFile = path.join(dir, "state.json");
+  const state = readJsonFile(stateFile, { run_id: runId, status: "running" });
+  state.updated_at = at;
+  state.messages = [...(state.messages || []), { at, type: eventType, message }].slice(-120);
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
+}
+
+function updateRunState(runId, update) {
+  const dir = runDir(runId);
+  if (!dir) return null;
+  const stateFile = path.join(dir, "state.json");
+  const state = readJsonFile(stateFile, { run_id: runId, status: "starting" });
+  update(state);
+  state.updated_at = new Date().toISOString();
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
+  return state;
+}
+
+function listRuns() {
+  return fs.readdirSync(RUNS, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => {
+      const state = readJsonFile(path.join(RUNS, d.name, "state.json"), {});
+      return {
+        run_id: d.name,
+        status: state.status || "unknown",
+        structure: state.structure || null,
+        updated_at: state.updated_at || null,
+      };
+    })
+    .sort((a, b) => {
+      const at = Date.parse(a.updated_at || "") || 0;
+      const bt = Date.parse(b.updated_at || "") || 0;
+      return bt - at || String(b.run_id).localeCompare(String(a.run_id));
+    });
+}
+
+function secondsBetween(a, b) {
+  const start = Date.parse(a || "");
+  const end = Date.parse(b || "");
+  return start && end ? Math.max(0, Math.round((end - start) / 100) / 10) : null;
+}
+
+function stats() {
+  const latest = listRuns().reduce((map, run) => {
+    const key = String(run.structure);
+    if (!map.has(key)) map.set(key, run);
+    return map;
+  }, new Map());
+  const perRun = [...latest.values()].map((run) => {
+    const dir = runDir(run.run_id);
+    const state = readJsonFile(path.join(dir, "state.json"), {});
+    const agents = Object.values(state.agents || {});
+    const steps = Object.values(state.steps || {});
+    const api = state.api_calls || [];
+    const apiDone = api.filter((call) => call.status === "complete");
+    const apiSeconds = apiDone.map((call) => Number(call.elapsed_seconds || 0)).filter(Boolean);
+    const leafAgents = agents.filter((agent) => String(agent.name || "").startsWith("table"));
+    const router = state.agents?.["image-router"];
+    const usage = readJsonFile(path.join(dir, "llm-usage", "llm-usage.summary.json"), {});
+    const tokens = usage.token_totals || {};
+    const payload = usage.payload_totals || {};
+    return {
+      run_id: run.run_id,
+      structure: run.structure,
+      status: state.status || run.status,
+      ordinal: state.target?.ordinal || null,
+      active_step: steps.find((step) => step.status === "running")?.name || null,
+      started_at: state.started_at || null,
+      updated_at: state.updated_at || run.updated_at || null,
+      finished_at: state.finished_at || state.finished_apply_at || null,
+      duration_seconds: secondsBetween(state.started_at, state.finished_at || state.finished_apply_at || state.updated_at),
+      api_calls_total: api.length,
+      api_calls_complete: apiDone.length,
+      api_seconds_total: Math.round(apiSeconds.reduce((a, b) => a + b, 0) * 10) / 10,
+      api_seconds_avg: apiSeconds.length ? Math.round((apiSeconds.reduce((a, b) => a + b, 0) / apiSeconds.length) * 10) / 10 : null,
+      images_total: agents.reduce((sum, agent) => sum + Number(agent.image_count || 0), 0),
+      leaf_complete: leafAgents.filter((agent) => agent.status === "complete").length,
+      leaf_total: leafAgents.length,
+      router_used: Boolean(router && Number(router.image_count || 0) > 0),
+      router_images: Number(router?.image_count || 0),
+      warnings_total: agents.reduce((sum, agent) => sum + (Array.isArray(agent.unresolved) ? agent.unresolved.length : 0), 0),
+      artifacts_total: (state.artifacts || []).length,
+      model_requests: usage.request_count || 0,
+      model_success: usage.success_count || 0,
+      token_input: tokens.input_tokens || 0,
+      token_output: tokens.output_tokens || 0,
+      token_total: tokens.total_tokens || 0,
+      token_cached_input: tokens.cached_input_tokens || 0,
+      token_reasoning_output: tokens.reasoning_output_tokens || 0,
+      payload_images: payload.input_images || 0,
+      slowest_api: apiDone
+        .slice()
+        .sort((a, b) => Number(b.elapsed_seconds || 0) - Number(a.elapsed_seconds || 0))
+        .slice(0, 3)
+        .map((call) => ({ agent: call.agent, seconds: call.elapsed_seconds, images: call.image_count })),
+    };
+  }).sort((a, b) => Number(a.ordinal || 999) - Number(b.ordinal || 999));
+  const statuses = perRun.reduce((acc, run) => {
+    acc[run.status || "unknown"] = (acc[run.status || "unknown"] || 0) + 1;
+    return acc;
+  }, {});
+  const completeRuns = perRun.filter((run) => run.status === "complete");
+  return {
+    updated_at: new Date().toISOString(),
+    folders_total: listStructures().length,
+    latest_runs_total: perRun.length,
+    statuses,
+    running_structures: perRun.filter((run) => run.status === "running").map((run) => run.structure),
+    api_calls_total: perRun.reduce((sum, run) => sum + run.api_calls_total, 0),
+    api_seconds_total: Math.round(perRun.reduce((sum, run) => sum + run.api_seconds_total, 0) * 10) / 10,
+    images_total: perRun.reduce((sum, run) => sum + run.images_total, 0),
+    model_requests_total: perRun.reduce((sum, run) => sum + run.model_requests, 0),
+    token_input_total: perRun.reduce((sum, run) => sum + run.token_input, 0),
+    token_output_total: perRun.reduce((sum, run) => sum + run.token_output, 0),
+    token_total: perRun.reduce((sum, run) => sum + run.token_total, 0),
+    token_cached_input_total: perRun.reduce((sum, run) => sum + run.token_cached_input, 0),
+    token_reasoning_output_total: perRun.reduce((sum, run) => sum + run.token_reasoning_output, 0),
+    avg_complete_duration_seconds: completeRuns.length
+      ? Math.round((completeRuns.reduce((sum, run) => sum + Number(run.duration_seconds || 0), 0) / completeRuns.length) * 10) / 10
+      : null,
+    bottlenecks: perRun
+      .flatMap((run) => run.slowest_api.map((apiCall) => ({ structure: run.structure, run_id: run.run_id, ...apiCall })))
+      .sort((a, b) => Number(b.seconds || 0) - Number(a.seconds || 0))
+      .slice(0, 10),
+    per_run: perRun,
+  };
+}
+
+function stamp() {
+  const date = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("");
+}
+
+function sanitizeStructure(value) {
+  return String(value || "").replace(/[^0-9A-Za-z_-]/g, "").trim();
+}
+
+function listStructures() {
+  return fs.readdirSync(SITE_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const match = entry.name.match(/^(\d+)\s+-\s+(\d+)/);
+      if (!match) return null;
+      return {
+        ordinal: Number(match[1]),
+        structure: match[2],
+        folder: entry.name,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.ordinal - b.ordinal);
+}
+
+function imageNeighborhood(req, res, url) {
+  const folder = url.searchParams.get("folder") || "";
+  const image = url.searchParams.get("image") || "";
+  const limit = Math.max(1, Math.min(24, Number(url.searchParams.get("limit") || "9")));
+  const dir = path.resolve(SITE_ROOT, folder);
+  if (!dir.startsWith(path.resolve(SITE_ROOT)) || !fs.existsSync(dir)) return json(res, 404, { error: "folder not found" });
+  const files = fs.readdirSync(dir)
+    .filter((name) => imageExt.has(path.extname(name).toLowerCase()))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const found = files.indexOf(image);
+  const index = found >= 0 ? found : 0;
+  const start = Math.max(0, Math.min(files.length, index - Math.floor(limit / 2)));
+  const selected = files.slice(start, start + limit);
+  return json(res, 200, {
+    folder,
+    image,
+    index,
+    total: files.length,
+    images: selected.map((name) => ({
+      name,
+      href: `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(name)}?size=420`,
+      current: name === image,
+    })),
+  });
+}
+
+function latestCompleteRunForStructure(structure) {
+  return listRuns().find((run) => String(run.structure) === String(structure) && run.status === "complete") || null;
+}
+
+function spawnRun(structure, offset, mode = "reuse") {
+  const python = process.env.PYTHON || "python3";
+  const runner = path.join(ROOT, "runner.py");
+  const runId = `${stamp()}-${String(offset + 1).padStart(2, "0")}-str${structure}`;
+  const dir = runDir(runId);
+  fs.mkdirSync(dir, { recursive: true });
+  const env = { ...process.env };
+  env.PYTHONPATH = SBA_SRC + (env.PYTHONPATH ? `:${env.PYTHONPATH}` : "");
+  const args = [runner, "--structure", structure, "--run-id", runId];
+  if (mode === "reuse") args.push("--reuse-from", "latest");
+  const child = spawn(python, args, {
+    cwd: ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const serverLog = path.join(RUNS, "server-spawn.log");
+  fs.appendFileSync(serverLog, `\n[start] pid=${child.pid} run=${runId} structure=${structure} at=${new Date().toISOString()}\n`);
+  child.stdout.on("data", (chunk) => fs.appendFileSync(serverLog, chunk));
+  child.stderr.on("data", (chunk) => fs.appendFileSync(serverLog, chunk));
+  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, run_id: runId, structure, started_at: new Date().toISOString() }, null, 2) + "\n");
+  child.on("exit", (code, signal) => {
+    fs.appendFileSync(serverLog, `[exit] pid=${child.pid} code=${code} signal=${signal}\n`);
+    updateRunState(runId, (state) => {
+      state.process = { pid: child.pid, code, signal, exited_at: new Date().toISOString() };
+      if (signal === "SIGTERM" && state.status === "running") state.status = "stopped";
+    });
+  });
+  return { pid: child.pid, run_id: runId, structure, mode };
+}
+
+function startRun(req, res, url) {
+  const requested = url.searchParams.get("structures") || url.searchParams.get("structure") || "193";
+  const mode = url.searchParams.get("mode") === "fresh" ? "fresh" : "reuse";
+  const structures = [...new Set(requested.split(",").map(sanitizeStructure).filter(Boolean))];
+  const runs = structures.map((structure, index) => spawnRun(structure, index, mode));
+  json(res, 202, { ok: true, runs });
+}
+
+function stopRun(req, res, url) {
+  const runId = runIdFromUrl(url);
+  const dir = runDir(runId);
+  if (!dir) return json(res, 404, { error: "unknown run" });
+  const control = readJsonFile(path.join(dir, "server-control.json"), {});
+  const pid = Number(control.pid || 0);
+  let stopped = false;
+  if (pid) {
+    try {
+      process.kill(pid, "SIGTERM");
+      stopped = true;
+    } catch (error) {
+      stopped = false;
+    }
+  }
+  updateRunState(runId, (state) => {
+    state.status = "stopped";
+    state.steps = state.steps || {};
+    state.steps.user_control = {
+      name: "user_control",
+      status: "stopped",
+      message: "Stopped from dashboard",
+      updated_at: new Date().toISOString(),
+      events: [{ at: new Date().toISOString(), status: "stopped", message: "Stopped from dashboard" }],
+    };
+  });
+  appendRunEvent(runId, "control", "Stopped from dashboard", { pid, signal_sent: stopped });
+  json(res, 200, { ok: true, run_id: runId, pid, signal_sent: stopped });
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) reject(new Error("request too large"));
+    });
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
+  });
+}
+
+async function feedback(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const runId = String(payload.run_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const agent = String(payload.agent || "human-feedback").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const item = {
+    at: new Date().toISOString(),
+    run_id: runId,
+    structure: payload.structure || null,
+    agent,
+    field: payload.field || "label",
+    previous: payload.previous || "",
+    value: payload.value || "",
+    reading: payload.reading || null,
+  };
+  fs.appendFileSync(GLOBAL_FEEDBACK, JSON.stringify(item) + "\n");
+  const dir = runDir(runId);
+  if (!dir) return json(res, 404, { error: "unknown run" });
+  fs.appendFileSync(path.join(dir, "feedback.jsonl"), JSON.stringify(item) + "\n");
+  updateRunState(runId, (state) => {
+    state.feedback = [...(state.feedback || []), item].slice(-100);
+    state.agents = state.agents || {};
+    const leaf = state.agents[agent] || { name: agent, status: "pending", events: [] };
+    leaf.feedback = [...(leaf.feedback || []), item].slice(-30);
+    leaf.message = "Human feedback attached";
+    state.agents[agent] = leaf;
+    state.agents["human-feedback"] = {
+      name: "human-feedback",
+      status: "complete",
+      message: `${state.feedback.length} feedback item${state.feedback.length === 1 ? "" : "s"} captured for future agent prompts`,
+      updated_at: item.at,
+      feedback_count: state.feedback.length,
+      feedback: state.feedback,
+      events: [{ at: item.at, status: "complete", message: "Feedback captured" }],
+    };
+  });
+  appendRunEvent(runId, "feedback", `Human feedback captured for ${agent}`, item);
+  json(res, 200, { ok: true, item });
+}
+
+async function api(req, res, url) {
+  if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
+  if (url.pathname === "/api/stats") return json(res, 200, stats());
+  if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
+  if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);
+  if (url.pathname === "/api/start") return startRun(req, res, url);
+  if (url.pathname === "/api/stop") return stopRun(req, res, url);
+  if (url.pathname === "/api/feedback") return feedback(req, res);
+  if (url.pathname === "/api/state") {
+    const id = runIdFromUrl(url);
+    const dir = runDir(id);
+    if (!dir) return json(res, 404, { error: "no current run" });
+    return json(res, 200, readJsonFile(path.join(dir, "state.json"), { run_id: id, status: "starting" }));
+  }
+  if (url.pathname === "/api/events") {
+    const id = runIdFromUrl(url);
+    const dir = runDir(id);
+    if (!dir) return json(res, 404, { error: "no current run" });
+    const since = Number(url.searchParams.get("since") || "0");
+    const file = path.join(dir, "events.jsonl");
+    let events = [];
+    if (fs.existsSync(file)) {
+      events = fs.readFileSync(file, "utf8")
+        .split(/\n+/)
+        .filter(Boolean)
+        .map((line) => {
+          try { return JSON.parse(line); } catch { return null; }
+        })
+        .filter(Boolean)
+        .filter((event) => Number(event.seq || 0) > since);
+    }
+    return json(res, 200, { run_id: id, events });
+  }
+  if (url.pathname.startsWith("/api/artifact/")) {
+    const [, , , runId, ...rest] = url.pathname.split("/");
+    const dir = runDir(runId);
+    const file = dir ? path.join(dir, rest.join("/")) : null;
+    if (!file || !file.startsWith(dir) || !fs.existsSync(file)) return send(res, 404, "not found", "text/plain");
+    return send(res, 200, fs.readFileSync(file), mime[path.extname(file)] || "application/octet-stream");
+  }
+  if (url.pathname.startsWith("/api/thumb/artifact/")) {
+    const [, , , , runId, ...rest] = url.pathname.split("/");
+    const dir = runDir(runId);
+    const file = dir ? path.join(dir, rest.join("/")) : null;
+    if (!file || !file.startsWith(dir) || !fs.existsSync(file)) return send(res, 404, "not found", "text/plain");
+    return sendThumb(res, file, url.searchParams.get("size") || 720);
+  }
+  if (url.pathname.startsWith("/api/thumb/site/")) {
+    const [, , , , folder, ...rest] = url.pathname.split("/");
+    const dir = path.resolve(SITE_ROOT, decodeURIComponent(folder || ""));
+    const file = path.resolve(dir, decodeURIComponent(rest.join("/") || ""));
+    if (!file.startsWith(path.resolve(SITE_ROOT)) || !fs.existsSync(file)) return send(res, 404, "not found", "text/plain");
+    return sendThumb(res, file, url.searchParams.get("size") || 420);
+  }
+  if (url.pathname.startsWith("/api/site-image/")) {
+    const [, , , folder, ...rest] = url.pathname.split("/");
+    const dir = path.resolve(SITE_ROOT, decodeURIComponent(folder || ""));
+    const file = path.resolve(dir, decodeURIComponent(rest.join("/") || ""));
+    if (!file.startsWith(path.resolve(SITE_ROOT)) || !fs.existsSync(file)) return send(res, 404, "not found", "text/plain");
+    return send(res, 200, fs.readFileSync(file), mime[path.extname(file).toLowerCase()] || "application/octet-stream");
+  }
+  return json(res, 404, { error: "unknown api route" });
+}
+
+function staticFile(req, res, url) {
+  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+  const file = path.join(PUBLIC, requested);
+  if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    return send(res, 404, "not found", "text/plain; charset=utf-8");
+  }
+  send(res, 200, fs.readFileSync(file), mime[path.extname(file)] || "application/octet-stream");
+}
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  if (url.pathname.startsWith("/api/")) return api(req, res, url).catch((error) => json(res, 500, { error: String(error.message || error) }));
+  return staticFile(req, res, url);
+});
+
+const port = Number(process.env.PORT || 4873);
+server.listen(port, "127.0.0.1", () => {
+  console.log(`subagent dashboard http://127.0.0.1:${port}`);
+});
