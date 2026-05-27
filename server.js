@@ -124,6 +124,16 @@ function updateRunState(runId, update) {
   return state;
 }
 
+function finishStatus(event) {
+  const explicit = String(event?.data?.status || "").toLowerCase();
+  if (explicit) return explicit;
+  const message = String(event?.message || "").toLowerCase();
+  if (message.includes("failed") || message.includes("fail")) return "failed";
+  if (message.includes("stopped") || message.includes("stop")) return "stopped";
+  if (message.includes("complete") || message.includes("succeeded") || event?.data?.output_docx) return "complete";
+  return null;
+}
+
 function readState(runId) {
   const dir = runDir(runId);
   if (!dir) return { run_id: runId, status: "starting" };
@@ -131,28 +141,36 @@ function readState(runId) {
   const state = readJsonFile(stateFile, { run_id: runId, status: "starting" });
   const finishes = readJsonLines(path.join(dir, "events.jsonl")).filter((event) => event.type === "finish");
   const finish = finishes.at(-1);
-  if (!finish || finish.data?.status !== "complete" || state.status === "complete") return state;
+  const reconciledStatus = finishStatus(finish);
+  if (!finish || !reconciledStatus) return state;
   const at = finish.at || new Date().toISOString();
-  state.status = "complete";
+  const changed = state.status !== reconciledStatus
+    || state.steps?.apply_docx?.status === "running"
+    || state.agents?.["run-orchestrator"]?.status === "running";
+  if (!changed) return state;
+  state.status = reconciledStatus;
   state.finished_at = state.finished_at || at;
   state.updated_at = state.updated_at || at;
+  if (finish.data?.output_docx) state.output_docx = state.output_docx || finish.data.output_docx;
   state.steps = state.steps || {};
-  state.steps.apply_docx = {
-    ...(state.steps.apply_docx || { name: "apply_docx", events: [] }),
-    name: "apply_docx",
-    status: "complete",
-    message: "Shared DOCX write complete",
-    updated_at: at,
-    events: [...((state.steps.apply_docx || {}).events || []), { at, status: "complete", message: "Recovered from finish event" }].slice(-20),
-  };
+  if (reconciledStatus === "complete" || state.steps.apply_docx?.status === "running") {
+    state.steps.apply_docx = {
+      ...(state.steps.apply_docx || { name: "apply_docx", events: [] }),
+      name: "apply_docx",
+      status: reconciledStatus === "complete" ? "complete" : reconciledStatus,
+      message: reconciledStatus === "complete" ? "Shared DOCX write complete" : finish.message,
+      updated_at: at,
+      events: [...((state.steps.apply_docx || {}).events || []), { at, status: reconciledStatus, message: "Recovered from finish event" }].slice(-20),
+    };
+  }
   state.agents = state.agents || {};
   state.agents["run-orchestrator"] = {
     ...(state.agents["run-orchestrator"] || { name: "run-orchestrator", events: [] }),
     name: "run-orchestrator",
-    status: "complete",
+    status: reconciledStatus,
     message: finish.message || "End-to-end run complete",
     updated_at: at,
-    events: [...((state.agents["run-orchestrator"] || {}).events || []), { at, status: "complete", message: "Recovered from finish event" }].slice(-20),
+    events: [...((state.agents["run-orchestrator"] || {}).events || []), { at, status: reconciledStatus, message: "Recovered from finish event" }].slice(-20),
   };
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
   return state;

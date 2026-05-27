@@ -398,18 +398,18 @@ main {
 
 .activity-ticker {
   position: fixed;
-  right: max(12px, calc((100vw - var(--content-width)) / 2 - 340px));
+  right: max(12px, calc((100vw - var(--content-width)) / 2 - 440px));
   bottom: 18px;
-  width: 326px;
-  max-height: 72px;
+  width: 420px;
+  max-height: 92px;
   z-index: 42;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid rgba(217, 209, 194, 0.56);
   border-radius: 16px;
-  background: rgba(255, 250, 241, 0.32);
+  background: rgba(255, 250, 241, 0.2);
   backdrop-filter: blur(16px);
   box-shadow: 0 18px 48px rgba(52, 39, 19, 0.08);
-  opacity: 0.38;
+  opacity: 0.24;
   overflow: hidden;
   transition: opacity 150ms ease, background 150ms ease, max-height 150ms ease;
   contain: layout paint style;
@@ -467,7 +467,7 @@ main {
 }
 
 .activity-current em {
-  color: var(--muted);
+  color: rgba(110, 106, 97, 0.84);
   font-size: 11px;
   font-style: normal;
   overflow: hidden;
