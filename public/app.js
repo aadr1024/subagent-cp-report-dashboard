@@ -17,6 +17,9 @@ let scrollablePanelQuietUntil = 0;
 let pendingRailRender = false;
 let pendingLauncherRender = false;
 let pendingStatsRender = null;
+let activityEvents = [];
+let activityRuns = [];
+let activityUpdatedAt = null;
 
 function loadFeedbackConsole() {
   try {
@@ -574,6 +577,69 @@ function renderEvents() {
   </div>`).join("");
 }
 
+function timeAgo(value) {
+  const at = Date.parse(value || "");
+  if (!at) return "--";
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+function ensureActivityTicker() {
+  let box = $("activityTicker");
+  if (!box) {
+    box = document.createElement("aside");
+    box.id = "activityTicker";
+    box.className = "activity-ticker";
+    document.body.appendChild(box);
+  }
+  return box;
+}
+
+function renderActivityTicker() {
+  const box = ensureActivityTicker();
+  const latest = activityEvents[0];
+  const active = activityRuns.length;
+  const statusText = active ? `${active} active run${active === 1 ? "" : "s"}` : "no active runs";
+  const headline = latest
+    ? `STR ${latest.structure || "?"} · ${latest.type || "event"} · ${timeAgo(latest.at)}`
+    : "waiting for run activity";
+  const message = latest?.message || (active ? "active runs detected, waiting for next event" : "no active run movement right now");
+  box.innerHTML = `<div class="activity-head">
+      <strong>Active run monitor</strong>
+      <mark class="${active ? "running" : "pending"}">${escapeHtml(statusText)}</mark>
+    </div>
+    <div class="activity-current">
+      <span>${escapeHtml(headline)}</span>
+      <em>${escapeHtml(message)}</em>
+    </div>
+    <div class="activity-run-list">${activityRuns.slice(0, 6).map((run) => `<div class="activity-run">
+      <strong>STR ${escapeHtml(run.structure || "?")}</strong>
+      <span>${escapeHtml(run.active_step || run.active_agent || "running")} · ${escapeHtml(timeAgo(run.updated_at))}</span>
+      <small>${Number(run.api_calls || 0)} api · ${Number(run.artifacts || 0)} files</small>
+    </div>`).join("") || `<div class="activity-run muted">No running STRs. Showing newest historical event.</div>`}</div>
+    <div class="activity-tail">${activityEvents.slice(0, 8).map((event) => `<div>
+      <span>${escapeHtml(fmtTime(event.at))}</span>
+      <strong>STR ${escapeHtml(event.structure || "?")}</strong>
+      <em>${escapeHtml(event.message || "")}</em>
+    </div>`).join("")}</div>
+    <small class="activity-updated">sidebar refresh ${escapeHtml(timeAgo(activityUpdatedAt))}</small>`;
+}
+
+async function pollActivity() {
+  try {
+    const res = await fetch("/api/activity", { cache: "no-store" });
+    if (!res.ok) return;
+    const payload = await res.json();
+    activityEvents = payload.events || [];
+    activityRuns = payload.active_runs || [];
+    activityUpdatedAt = payload.updated_at || new Date().toISOString();
+    renderActivityTicker();
+  } catch {}
+}
+
 function persistFeedbackConsole() {
   localStorage.setItem("subagentFeedbackConsole", JSON.stringify(feedbackConsoleItems.slice(-150)));
 }
@@ -1011,7 +1077,9 @@ document.addEventListener("mouseover", async (event) => {
 loadStructures();
 renderFeedbackConsole();
 poll();
+pollActivity();
 setInterval(poll, 600);
+setInterval(pollActivity, 2000);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
 }, 500);

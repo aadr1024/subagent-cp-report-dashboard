@@ -415,6 +415,57 @@ function stats() {
   };
 }
 
+function activityFeed() {
+  const events = [];
+  const active_runs = [];
+  const runs = listRuns();
+  const runningIds = new Set();
+  for (const run of runs) {
+    if (run.status !== "running") continue;
+    runningIds.add(run.run_id);
+    const state = readState(run.run_id);
+    const steps = Object.values(state.steps || {});
+    const agents = Object.values(state.agents || {});
+    active_runs.push({
+      run_id: run.run_id,
+      structure: run.structure,
+      status: state.status || run.status,
+      active_step: steps.find((step) => step.status === "running")?.name || null,
+      active_agent: agents.find((agent) => agent.status === "running")?.name || null,
+      updated_at: state.updated_at || run.updated_at || null,
+      api_calls: (state.api_calls || []).length,
+      artifacts: (state.artifacts || []).length,
+    });
+  }
+  const sourceRuns = runningIds.size ? runs.filter((run) => runningIds.has(run.run_id)) : runs.slice(0, 24);
+  for (const run of sourceRuns.slice(0, 60)) {
+    const dir = runDir(run.run_id);
+    const file = dir ? path.join(dir, "events.jsonl") : null;
+    if (!file || !fs.existsSync(file)) continue;
+    const lines = fs.readFileSync(file, "utf8").split(/\n+/).filter(Boolean).slice(-32);
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        events.push({
+          run_id: run.run_id,
+          structure: run.structure,
+          status: run.status,
+          seq: event.seq || 0,
+          at: event.at || null,
+          type: event.type || "event",
+          message: event.message || "",
+        });
+      } catch {}
+    }
+  }
+  return {
+    active_runs,
+    events: events
+      .sort((a, b) => (Date.parse(b.at || "") || 0) - (Date.parse(a.at || "") || 0) || Number(b.seq || 0) - Number(a.seq || 0))
+      .slice(0, 80),
+  };
+}
+
 function stamp() {
   const date = new Date();
   const pad = (value) => String(value).padStart(2, "0");
@@ -601,6 +652,7 @@ async function feedback(req, res) {
 async function api(req, res, url) {
   if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
   if (url.pathname === "/api/stats") return json(res, 200, stats());
+  if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
   if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
   if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);
   if (url.pathname === "/api/start") return startRun(req, res, url);
