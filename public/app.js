@@ -626,13 +626,35 @@ function renderStats(stats) {
       <div class="mini-title">Per-STR health</div>
       <div class="health-list compact-health">${(stats.per_run || []).map(renderRunStat).join("")}</div>
     </div>
+    <div>
+      <div class="mini-title">Token cost proxy by agent</div>
+      <div class="health-list compact-health">${(stats.usage_by_agent || []).slice(0, 12).map(renderUsageBucket).join("") || `<div class="message">No usage logs yet.</div>`}</div>
+    </div>
+    <div>
+      <div class="mini-title">Token cost proxy by phase</div>
+      <div class="health-list">${(stats.usage_by_phase || []).map(renderUsageBucket).join("") || `<div class="message">No phase usage yet.</div>`}</div>
+    </div>
+    <div>
+      <div class="mini-title">Largest token calls</div>
+      <div class="health-list">${(stats.largest_token_calls || []).map((item) => `<div class="health-row">
+        <strong>STR ${escapeHtml(item.structure)} · ${escapeHtml(item.agent)}</strong>
+        <span><mark class="api-tag">${formatCompact(item.total_tokens)} tok</mark> <mark>${formatCompact(item.input_tokens)} in</mark> <mark>${formatCompact(item.output_tokens)} out</mark> <mark class="image-tag">${item.input_images ?? 0} imgs</mark></span>
+      </div>`).join("") || `<div class="message">No token calls yet.</div>`}</div>
+    </div>
   </div>`;
 }
 
 function renderRunStat(run) {
   return `<div class="health-row ${cls(run.status)}">
     <strong>STR ${escapeHtml(run.structure)}</strong>
-    <span><mark class="${run.status === "complete" ? "ok" : run.status === "running" ? "hot" : run.status === "failed" ? "bad" : ""}">${escapeHtml(run.status)}</mark> <mark>${run.duration_seconds ?? "--"}s</mark> <mark class="api-tag">API ${run.api_calls_complete}/${run.api_calls_total}</mark> <mark class="image-tag">${run.images_total} imgs</mark> <mark>leaves ${run.leaf_complete}/${run.leaf_total}</mark>${run.active_step ? ` <mark class="hot">${escapeHtml(run.active_step)}</mark>` : ""}</span>
+    <span><mark class="${run.status === "complete" ? "ok" : run.status === "running" ? "hot" : run.status === "failed" ? "bad" : ""}">${escapeHtml(run.status)}</mark> <mark>${run.duration_seconds ?? "--"}s</mark> <mark class="api-tag">API ${run.api_calls_complete}/${run.api_calls_total}</mark> <mark class="api-tag">${formatCompact(run.token_total || 0)} tok</mark> <mark class="image-tag">${run.images_total} imgs</mark> <mark>leaves ${run.leaf_complete}/${run.leaf_total}</mark>${run.active_step ? ` <mark class="hot">${escapeHtml(run.active_step)}</mark>` : ""}</span>
+  </div>`;
+}
+
+function renderUsageBucket(bucket) {
+  return `<div class="health-row">
+    <strong>${escapeHtml(bucket.name)}</strong>
+    <span><mark class="api-tag">${formatCompact(bucket.total_tokens)} tok</mark> <mark>${formatCompact(bucket.input_tokens)} in</mark> <mark>${formatCompact(bucket.output_tokens)} out</mark> <mark>${bucket.requests} req</mark> <mark class="image-tag">${bucket.input_images} imgs</mark> <mark>${bucket.avg_tokens_per_request ?? "--"} tok/req</mark> <mark>${bucket.tokens_per_image ?? "--"} tok/img</mark> <mark class="hot">${bucket.api_seconds}s</mark></span>
   </div>`;
 }
 

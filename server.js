@@ -149,6 +149,117 @@ function secondsBetween(a, b) {
   return start && end ? Math.max(0, Math.round((end - start) / 100) / 10) : null;
 }
 
+function readJsonLines(file) {
+  try {
+    return fs.readFileSync(file, "utf8")
+      .split(/\n+/)
+      .filter(Boolean)
+      .map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function emptyUsageBucket(name) {
+  return {
+    name,
+    requests: 0,
+    successes: 0,
+    errors: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    cached_input_tokens: 0,
+    reasoning_output_tokens: 0,
+    input_images: 0,
+    input_text_chars: 0,
+    api_seconds: 0,
+  };
+}
+
+function addUsage(bucket, entry, call) {
+  const usage = entry.usage || {};
+  const payload = entry.payload_stats || {};
+  bucket.requests += 1;
+  bucket.successes += entry.request_status === "ok" ? 1 : 0;
+  bucket.errors += entry.request_status === "ok" ? 0 : 1;
+  bucket.input_tokens += Number(usage.input_tokens || 0);
+  bucket.output_tokens += Number(usage.output_tokens || 0);
+  bucket.total_tokens += Number(usage.total_tokens || 0);
+  bucket.cached_input_tokens += Number(usage.cached_input_tokens || 0);
+  bucket.reasoning_output_tokens += Number(usage.reasoning_output_tokens || 0);
+  bucket.input_images += Number(payload.input_images || 0);
+  bucket.input_text_chars += Number(payload.input_text_chars || 0);
+  bucket.api_seconds += Number(call?.elapsed_seconds || 0);
+}
+
+function finishUsage(bucket) {
+  return {
+    ...bucket,
+    api_seconds: Math.round(bucket.api_seconds * 10) / 10,
+    avg_seconds_per_request: bucket.requests ? Math.round((bucket.api_seconds / bucket.requests) * 10) / 10 : null,
+    avg_tokens_per_request: bucket.requests ? Math.round(bucket.total_tokens / bucket.requests) : null,
+    tokens_per_image: bucket.input_images ? Math.round(bucket.total_tokens / bucket.input_images) : null,
+    input_output_ratio: bucket.output_tokens ? Math.round((bucket.input_tokens / bucket.output_tokens) * 10) / 10 : null,
+  };
+}
+
+function usageDetails(dir, state) {
+  const entries = readJsonLines(path.join(dir, "llm-usage", "llm-usage.jsonl"));
+  const callsByResponse = new Map((state.api_calls || []).filter((call) => call.response_id).map((call) => [call.response_id, call]));
+  const total = emptyUsageBucket("total");
+  const byAgent = new Map();
+  const byPhase = new Map();
+  const byModel = new Map();
+  const calls = [];
+  for (const entry of entries) {
+    const call = callsByResponse.get(entry.response_id) || {};
+    const agent = call.agent || "unknown";
+    const phase = agent === "image-router" ? "image-router"
+      : String(agent).startsWith("table3") ? "table3"
+      : String(agent).startsWith("table4") ? "table4"
+      : String(agent).startsWith("table5") ? "table5"
+      : String(agent).startsWith("table6") ? "table6"
+      : String(agent).includes("reuse") ? "reuse"
+      : "other";
+    const model = entry.model || "unknown";
+    if (!byAgent.has(agent)) byAgent.set(agent, emptyUsageBucket(agent));
+    if (!byPhase.has(phase)) byPhase.set(phase, emptyUsageBucket(phase));
+    if (!byModel.has(model)) byModel.set(model, emptyUsageBucket(model));
+    addUsage(total, entry, call);
+    addUsage(byAgent.get(agent), entry, call);
+    addUsage(byPhase.get(phase), entry, call);
+    addUsage(byModel.get(model), entry, call);
+    const usage = entry.usage || {};
+    const payload = entry.payload_stats || {};
+    calls.push({
+      agent,
+      phase,
+      model,
+      response_id: entry.response_id || null,
+      seconds: Number(call.elapsed_seconds || 0),
+      input_tokens: Number(usage.input_tokens || 0),
+      output_tokens: Number(usage.output_tokens || 0),
+      total_tokens: Number(usage.total_tokens || 0),
+      cached_input_tokens: Number(usage.cached_input_tokens || 0),
+      reasoning_output_tokens: Number(usage.reasoning_output_tokens || 0),
+      input_images: Number(payload.input_images || 0),
+      request_status: entry.request_status || "unknown",
+    });
+  }
+  return {
+    total: finishUsage(total),
+    by_agent: [...byAgent.values()].map(finishUsage).sort((a, b) => b.total_tokens - a.total_tokens),
+    by_phase: [...byPhase.values()].map(finishUsage).sort((a, b) => b.total_tokens - a.total_tokens),
+    by_model: [...byModel.values()].map(finishUsage).sort((a, b) => b.total_tokens - a.total_tokens),
+    slowest_calls: calls.slice().sort((a, b) => b.seconds - a.seconds).slice(0, 5),
+    largest_token_calls: calls.slice().sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 5),
+  };
+}
+
 function stats() {
   const latest = listRuns().reduce((map, run) => {
     const key = String(run.structure);
@@ -166,8 +277,9 @@ function stats() {
     const leafAgents = agents.filter((agent) => String(agent.name || "").startsWith("table"));
     const router = state.agents?.["image-router"];
     const usage = readJsonFile(path.join(dir, "llm-usage", "llm-usage.summary.json"), {});
-    const tokens = usage.token_totals || {};
-    const payload = usage.payload_totals || {};
+    const usageDetail = usageDetails(dir, state);
+    const tokens = usage.token_totals || usageDetail.total || {};
+    const payload = usage.payload_totals || usageDetail.total || {};
     return {
       run_id: run.run_id,
       structure: run.structure,
@@ -197,6 +309,12 @@ function stats() {
       token_cached_input: tokens.cached_input_tokens || 0,
       token_reasoning_output: tokens.reasoning_output_tokens || 0,
       payload_images: payload.input_images || 0,
+      cost_proxy: usageDetail.total,
+      usage_by_agent: usageDetail.by_agent,
+      usage_by_phase: usageDetail.by_phase,
+      usage_by_model: usageDetail.by_model,
+      slowest_model_calls: usageDetail.slowest_calls,
+      largest_token_calls: usageDetail.largest_token_calls,
       slowest_api: apiDone
         .slice()
         .sort((a, b) => Number(b.elapsed_seconds || 0) - Number(a.elapsed_seconds || 0))
@@ -209,6 +327,27 @@ function stats() {
     return acc;
   }, {});
   const completeRuns = perRun.filter((run) => run.status === "complete");
+  const aggregateBuckets = (key) => {
+    const map = new Map();
+    for (const run of perRun) {
+      for (const bucket of run[key] || []) {
+        if (!map.has(bucket.name)) map.set(bucket.name, emptyUsageBucket(bucket.name));
+        const target = map.get(bucket.name);
+        target.requests += Number(bucket.requests || 0);
+        target.successes += Number(bucket.successes || 0);
+        target.errors += Number(bucket.errors || 0);
+        target.input_tokens += Number(bucket.input_tokens || 0);
+        target.output_tokens += Number(bucket.output_tokens || 0);
+        target.total_tokens += Number(bucket.total_tokens || 0);
+        target.cached_input_tokens += Number(bucket.cached_input_tokens || 0);
+        target.reasoning_output_tokens += Number(bucket.reasoning_output_tokens || 0);
+        target.input_images += Number(bucket.input_images || 0);
+        target.input_text_chars += Number(bucket.input_text_chars || 0);
+        target.api_seconds += Number(bucket.api_seconds || 0);
+      }
+    }
+    return [...map.values()].map(finishUsage).sort((a, b) => b.total_tokens - a.total_tokens);
+  };
   return {
     updated_at: new Date().toISOString(),
     folders_total: listStructures().length,
@@ -224,6 +363,13 @@ function stats() {
     token_total: perRun.reduce((sum, run) => sum + run.token_total, 0),
     token_cached_input_total: perRun.reduce((sum, run) => sum + run.token_cached_input, 0),
     token_reasoning_output_total: perRun.reduce((sum, run) => sum + run.token_reasoning_output, 0),
+    usage_by_agent: aggregateBuckets("usage_by_agent"),
+    usage_by_phase: aggregateBuckets("usage_by_phase"),
+    usage_by_model: aggregateBuckets("usage_by_model"),
+    largest_token_calls: perRun
+      .flatMap((run) => (run.largest_token_calls || []).map((call) => ({ structure: run.structure, run_id: run.run_id, ...call })))
+      .sort((a, b) => Number(b.total_tokens || 0) - Number(a.total_tokens || 0))
+      .slice(0, 10),
     avg_complete_duration_seconds: completeRuns.length
       ? Math.round((completeRuns.reduce((sum, run) => sum + Number(run.duration_seconds || 0), 0) / completeRuns.length) * 10) / 10
       : null,
