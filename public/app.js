@@ -1,4 +1,4 @@
-const selectedStructures = new Set(["192", "191", "189", "188"]);
+const selectedStructures = new Set();
 const selectedRunIds = new Set();
 const lastSeqByRun = new Map();
 const eventsByRun = new Map();
@@ -339,24 +339,22 @@ function renderRunBoards(states) {
 }
 
 function renderMovementLog(events, state) {
+  const latest = events[0];
   const rows = events.length
     ? events.map((event) => `<div class="movement-row ${escapeHtml(event.type || "")}">
         <span>${fmtTime(event.at)}</span>
         <strong>${escapeHtml(event.type || "event")}</strong>
         <em>${escapeHtml(event.message || "")}</em>
       </div>`).join("")
-    : `<div class="movement-row pulse"><span>now</span><strong>${escapeHtml(state.status || "waiting")}</strong><em>Waiting for next event...</em></div>`;
-  return `${state.status === "running" ? `<div class="heartbeat"><i></i><span>active run heartbeat</span></div>` : ""}${rows}`;
+    : `<div class="movement-row"><span>now</span><strong>${escapeHtml(state.status || "waiting")}</strong><em>Waiting for next event...</em></div>`;
+  return `${state.status === "running" ? `<div class="heartbeat"><strong>${fmtTime(latest?.at)}</strong><span>${escapeHtml(latest?.message || "waiting for next event")}</span></div>` : ""}${rows}`;
 }
 
 function expandedRunIds(states) {
-  if (openLimit === "all") return new Set(states.map((state) => state.run_id));
+  const manuallyOpen = states.filter((state) => manualOpenRunIds.has(state.run_id)).map((state) => state.run_id);
+  if (openLimit === "all") return new Set(manuallyOpen);
   const limit = Number(openLimit) || 4;
-  if (!states.length) return new Set();
-  let index = focusedRunId ? states.findIndex((state) => state.run_id === focusedRunId) : 0;
-  if (index < 0) index = 0;
-  const start = limit === 5 ? Math.max(0, index - 1) : index;
-  return new Set(states.slice(start, start + limit).map((state) => state.run_id));
+  return new Set(manuallyOpen.slice(0, limit));
 }
 
 function renderStepCards(steps) {
@@ -419,6 +417,8 @@ function renderFoldRail() {
     <div class="rail-list">${knownStructures.map((item, index) => {
       const run = latest.get(String(item.structure));
       const open = run && (manualOpenRunIds.has(run.run_id) || visible.has(run.run_id));
+      const status = run?.status || "not-running";
+      const label = run?.status || "not running";
       return `<button class="rail-item ${cls(run?.status || "pending")} ${open ? "open" : ""}"
         data-index="${index}"
         data-structure="${escapeHtml(item.structure)}"
@@ -426,7 +426,7 @@ function renderFoldRail() {
         <em>${open ? "v" : "^"}</em>
         <span>${String(item.ordinal).padStart(3, "0")}</span>
         <strong>${escapeHtml(item.structure)}</strong>
-        <small>${escapeHtml(run?.status || "not run")}</small>
+        <small><mark class="${cls(status)}">${escapeHtml(label)}</mark></small>
       </button>`;
     }).join("")}</div>`;
 }
@@ -688,10 +688,7 @@ async function loadStructures() {
 }
 
 function visibleRunIds() {
-  const selected = new Set([...selectedRunIds]);
-  for (const run of knownRuns) if (run.status === "running") selected.add(run.run_id);
-  for (const runId of manualOpenRunIds) selected.add(runId);
-  return [...selected].slice(0, 8);
+  return [...manualOpenRunIds].slice(0, 12);
 }
 
 function summarize(states) {
@@ -760,7 +757,13 @@ async function startRun() {
   const res = await fetch(`/api/start?structures=${encodeURIComponent(structures.join(","))}&mode=${encodeURIComponent(mode)}`, { method: "POST" });
   if (res.ok) {
     const payload = await res.json();
-    for (const run of payload.runs || []) selectedRunIds.add(run.run_id);
+    const runs = payload.runs || [];
+    for (const run of runs) selectedRunIds.add(run.run_id);
+    if (runs[0]?.run_id) {
+      manualOpenRunIds.clear();
+      manualOpenRunIds.add(runs[0].run_id);
+      focusedRunId = runs[0].run_id;
+    }
   }
   setTimeout(() => {
     $("startBtn").disabled = false;
@@ -777,6 +780,9 @@ async function startOne(structure) {
     for (const run of payload.runs || []) {
       selectedRunIds.add(run.run_id);
       selectedStructures.add(String(run.structure));
+      manualOpenRunIds.clear();
+      manualOpenRunIds.add(run.run_id);
+      focusedRunId = run.run_id;
     }
     renderStructurePicker();
     poll();
@@ -849,6 +855,9 @@ document.addEventListener("click", (event) => {
   if (view) {
     selectedRunIds.add(view.dataset.runId);
     selectedStructures.add(String(view.dataset.structure));
+    manualOpenRunIds.clear();
+    manualOpenRunIds.add(view.dataset.runId);
+    focusedRunId = view.dataset.runId;
     renderStructurePicker();
     poll();
   }
@@ -949,7 +958,7 @@ document.addEventListener("mouseover", async (event) => {
 loadStructures();
 renderFeedbackConsole();
 poll();
-setInterval(poll, 900);
+setInterval(poll, 600);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
 }, 500);

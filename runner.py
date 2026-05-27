@@ -98,6 +98,21 @@ class RunLog:
     def write_state(self):
         self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
 
+    def refresh_from_disk(self):
+        with self.lock:
+            try:
+                disk_state = json.loads(self.state_path.read_text())
+            except Exception:
+                disk_state = None
+            if isinstance(disk_state, dict):
+                self.state = disk_state
+            try:
+                for line in self.events_path.read_text().splitlines():
+                    if line.strip():
+                        self.seq = max(self.seq, int(json.loads(line).get("seq") or 0))
+            except Exception:
+                pass
+
     def finish(self, status: str, message: str):
         with self.lock:
             self.state["status"] = status
@@ -385,11 +400,15 @@ def main() -> None:
                 apply = subprocess.run([sys.executable, str(ROOT / "apply_to_docx.py"), "--run", run_id], cwd=ROOT, text=True, capture_output=True)
                 if apply.returncode != 0:
                     detail = (apply.stderr or apply.stdout or "apply_to_docx.py failed").strip()
+                    log.refresh_from_disk()
                     log.step("apply_docx", "failed", detail[-1200:])
                     log.agent("run-orchestrator", "failed", "Run failed during monitored DOCX write")
                     log.finish("failed", "DOCX apply failed")
                     return
+                log.refresh_from_disk()
+                log.step("apply_docx", "complete", "Shared DOCX write complete", target_tables=tables)
                 log.agent("run-orchestrator", "complete", "Reuse run complete: shared DOCX write finished")
+                log.finish("complete", "End-to-end reuse run complete")
                 return
             log.agent("reuse-transcription", "blocked", "No complete prior transcription found; falling back to fresh OpenAI visual leaves")
 
@@ -450,11 +469,15 @@ def main() -> None:
         apply = subprocess.run([sys.executable, str(ROOT / "apply_to_docx.py"), "--run", run_id], cwd=ROOT, text=True, capture_output=True)
         if apply.returncode != 0:
             detail = (apply.stderr or apply.stdout or "apply_to_docx.py failed").strip()
+            log.refresh_from_disk()
             log.step("apply_docx", "failed", detail[-1200:])
             log.agent("run-orchestrator", "failed", "Run failed during monitored DOCX write")
             log.finish("failed", "DOCX apply failed")
             return
+        log.refresh_from_disk()
+        log.step("apply_docx", "complete", "Shared DOCX write complete", target_tables=tables)
         log.agent("run-orchestrator", "complete", "Run complete: extraction and shared DOCX write finished")
+        log.finish("complete", "End-to-end run complete")
     except Exception as exc:
         log.step("fatal", "failed", str(exc))
         log.agent("run-orchestrator", "failed", str(exc))

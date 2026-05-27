@@ -124,11 +124,45 @@ function updateRunState(runId, update) {
   return state;
 }
 
+function readState(runId) {
+  const dir = runDir(runId);
+  if (!dir) return { run_id: runId, status: "starting" };
+  const stateFile = path.join(dir, "state.json");
+  const state = readJsonFile(stateFile, { run_id: runId, status: "starting" });
+  const finishes = readJsonLines(path.join(dir, "events.jsonl")).filter((event) => event.type === "finish");
+  const finish = finishes.at(-1);
+  if (!finish || finish.data?.status !== "complete" || state.status === "complete") return state;
+  const at = finish.at || new Date().toISOString();
+  state.status = "complete";
+  state.finished_at = state.finished_at || at;
+  state.updated_at = state.updated_at || at;
+  state.steps = state.steps || {};
+  state.steps.apply_docx = {
+    ...(state.steps.apply_docx || { name: "apply_docx", events: [] }),
+    name: "apply_docx",
+    status: "complete",
+    message: "Shared DOCX write complete",
+    updated_at: at,
+    events: [...((state.steps.apply_docx || {}).events || []), { at, status: "complete", message: "Recovered from finish event" }].slice(-20),
+  };
+  state.agents = state.agents || {};
+  state.agents["run-orchestrator"] = {
+    ...(state.agents["run-orchestrator"] || { name: "run-orchestrator", events: [] }),
+    name: "run-orchestrator",
+    status: "complete",
+    message: finish.message || "End-to-end run complete",
+    updated_at: at,
+    events: [...((state.agents["run-orchestrator"] || {}).events || []), { at, status: "complete", message: "Recovered from finish event" }].slice(-20),
+  };
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
+  return state;
+}
+
 function listRuns() {
   return fs.readdirSync(RUNS, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => {
-      const state = readJsonFile(path.join(RUNS, d.name, "state.json"), {});
+      const state = readState(d.name);
       return {
         run_id: d.name,
         status: state.status || "unknown",
@@ -268,7 +302,7 @@ function stats() {
   }, new Map());
   const perRun = [...latest.values()].map((run) => {
     const dir = runDir(run.run_id);
-    const state = readJsonFile(path.join(dir, "state.json"), {});
+    const state = readState(run.run_id);
     const agents = Object.values(state.agents || {});
     const steps = Object.values(state.steps || {});
     const api = state.api_calls || [];
@@ -576,7 +610,7 @@ async function api(req, res, url) {
     const id = runIdFromUrl(url);
     const dir = runDir(id);
     if (!dir) return json(res, 404, { error: "no current run" });
-    return json(res, 200, readJsonFile(path.join(dir, "state.json"), { run_id: id, status: "starting" }));
+    return json(res, 200, readState(id));
   }
   if (url.pathname === "/api/events") {
     const id = runIdFromUrl(url);
