@@ -146,11 +146,18 @@ function evidenceGroupForReading(reading, images, readings, agent) {
   return images.filter((image) => set.has(image.source_image));
 }
 
-function renderReadingChip(reading, images, runId, agent, folderName, readings) {
+function renderReadingChip(reading, images, runId, agent, folderName, readings, contextGroups = []) {
   const image = imageForReading(reading, images);
   const img = image ? artifactThumbHref(runId, image.artifact, 900) : "";
   const groupImages = evidenceGroupForReading(reading, images, readings, agent);
   const groupSources = groupImages.map((item) => item.source_image);
+  const groupSet = new Set(groupSources);
+  const hoverGroups = contextGroups.map((group) => ({
+    title: group.title,
+    sources: group.sources,
+    agent: group.agent,
+    current: (group.sources || []).some((source) => groupSet.has(source)),
+  })).filter((group) => group.title && Array.isArray(group.sources) && group.sources.length);
   const neighborhood = folderName && reading.source_image
     ? `/api/image-neighborhood?folder=${encodeURIComponent(folderName)}&image=${encodeURIComponent(reading.source_image)}&limit=21`
     : "";
@@ -176,7 +183,7 @@ function renderReadingChip(reading, images, runId, agent, folderName, readings) 
         <img data-src="${img}" alt="${escapeHtml(reading.source_image || label)}" decoding="async" fetchpriority="low" />
         <div>${escapeHtml(label)}</div>
       </div>
-      <div class="neighbor-strip">
+      <div class="neighbor-strip" data-context-groups="${escapeHtml(JSON.stringify(hoverGroups))}">
         <div class="neighbor-loading">hover: loading before/current/after images</div>
       </div>
     </div>` : ""}
@@ -187,6 +194,10 @@ function tableDisplayName(agentKey) {
   if (agentKey === "table4-stations") return "Table 4";
   if (agentKey === "table5-currents") return "Table 5";
   if (agentKey === "table6-potentials") return "Table 6";
+  if (String(agentKey).startsWith("table3-")) {
+    const direction = String(agentKey).replace("table3-", "");
+    return `Table 3 ${direction.slice(0, 1).toUpperCase()}${direction.slice(1)}`;
+  }
   return agentKey;
 }
 
@@ -267,26 +278,62 @@ function displayGroupsForReadings(agentKey, readings) {
   return imageProximityGroups(readings, agentKey);
 }
 
-function renderReadingGroups(agentKey, readings, images, runId, folderName) {
+function renderReadingGroups(agentKey, readings, images, runId, folderName, contextGroups = []) {
   const groups = displayGroupsForReadings(agentKey, readings);
   if (groups.length === 1 && !groups[0].title) {
-    return readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings)).join("");
+    return readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings, contextGroups)).join("");
   }
   return groups.map((group) => `<section class="reading-group">
     <div class="reading-group-head">
       <strong>${escapeHtml(group.title)}</strong>
       <small>${group.readings.length} value${group.readings.length === 1 ? "" : "s"}</small>
     </div>
-    <div class="reading-group-values">${group.readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings)).join("")}</div>
+    <div class="reading-group-values">${group.readings.map((reading) => renderReadingChip(reading, images, runId, agentKey, folderName, readings, contextGroups)).join("")}</div>
   </section>`).join("");
 }
 
-function renderLeaf(agentKey, agent, runId, folderName) {
+function readingKind(agentKey, readings) {
+  if (agentKey === "table5-currents") return "current";
+  if (agentKey === "table6-potentials") return "potential";
+  if (agentKey === "table4-stations") {
+    const names = [...new Set(readings.map((reading) => reading.row_name || reading.annotation_label || "").filter(Boolean).map((value) => String(value).replace(/^table\s*4\s*/i, "").replace(/[_-]+/g, " ").trim()).filter(Boolean))];
+    const compact = names.filter((name) => !/^table\s*4$/i.test(name)).slice(0, 2);
+    return compact.length ? compact.join(" + ") : "current + shunt";
+  }
+  if (String(agentKey).startsWith("table3-")) return agentKey.replace("table3-", "table 3 ");
+  return "";
+}
+
+function hoverTitleForGroup(agentKey, group) {
+  const base = group.title || tableDisplayName(agentKey);
+  const kind = readingKind(agentKey, group.readings || []);
+  return kind && !base.toLowerCase().includes(kind.toLowerCase()) ? `${base} · ${kind}` : base;
+}
+
+function hoverContextGroupsForAgents(agents) {
+  const groups = [];
+  for (const [agentKey, agent] of Object.entries(agents || {})) {
+    const readings = Array.isArray(agent.readings) ? agent.readings : [];
+    if (!readings.length) continue;
+    for (const group of displayGroupsForReadings(agentKey, readings)) {
+      const sources = [...new Set((group.readings || []).map((reading) => reading.source_image).filter(Boolean))];
+      if (!sources.length) continue;
+      groups.push({
+        agent: agentKey,
+        title: hoverTitleForGroup(agentKey, group),
+        sources,
+      });
+    }
+  }
+  return groups;
+}
+
+function renderLeaf(agentKey, agent, runId, folderName, contextGroups = []) {
   const readings = Array.isArray(agent.readings) ? agent.readings : [];
   const images = Array.isArray(agent.image_refs) ? agent.image_refs : [];
   const unresolved = Array.isArray(agent.unresolved) ? agent.unresolved : [];
   const values = readings.length
-    ? renderReadingGroups(agentKey, readings, images, runId, folderName)
+    ? renderReadingGroups(agentKey, readings, images, runId, folderName, contextGroups)
     : `<div class="message">Values pending. Source packet visible below when prepared.</div>`;
   const feedback = Array.isArray(agent.feedback) ? agent.feedback : [];
   const prompt = agent.prompt_summary ? `<div class="prompt-box">${escapeHtml(agent.prompt_summary)}</div>` : "";
@@ -324,8 +371,9 @@ function renderAgents(agents, runId, folderName) {
     ...parentOrder.filter((key) => agents[key]),
     ...Object.keys(agents).filter((key) => !parentOrder.includes(key)).sort(),
   ];
+  const contextGroups = hoverContextGroupsForAgents(agents);
   return keys.length
-    ? keys.map((key) => renderLeaf(key, agents[key], runId, folderName)).join("")
+    ? keys.map((key) => renderLeaf(key, agents[key], runId, folderName, contextGroups)).join("")
     : `<div class="message">Parent agents will appear as soon as the run state is created.</div>`;
 }
 
@@ -1140,28 +1188,36 @@ async function hydrateHoverPreview(preview) {
     if (!res.ok) return;
     const payload = await res.json();
     const strip = preview.querySelector(".neighbor-strip");
-    let groupSources = [];
-    try { groupSources = JSON.parse(preview.dataset.groupSources || "[]"); } catch {}
-    const groupSet = new Set(groupSources);
+    let contextGroups = [];
+    try { contextGroups = JSON.parse(strip.dataset.contextGroups || "[]"); } catch {}
     const figures = (images) => images.map((image) => `<figure class="neighbor ${image.current ? "current" : ""}">
       <img src="${escapeHtml(image.href)}" alt="${escapeHtml(image.name)}" loading="lazy" decoding="async" fetchpriority="low" />
       <figcaption>${escapeHtml(image.name)}</figcaption>
     </figure>`).join("");
+    const groupForImage = (image) => {
+      const matches = contextGroups.filter((group) => (group.sources || []).includes(image.name));
+      return matches.find((group) => group.current) || matches[0] || null;
+    };
+    const sameGroup = (a, b) => a && b && a.title === b.title && a.agent === b.agent && Boolean(a.current) === Boolean(b.current);
     const parts = [];
     const sourceImages = payload.images || [];
     for (let index = 0; index < sourceImages.length; index += 1) {
       const image = sourceImages[index];
-      if (!groupSet.has(image.name)) {
+      const matchedGroup = groupForImage(image);
+      if (!matchedGroup) {
         parts.push(figures([image]));
         continue;
       }
       const group = [];
-      while (index < sourceImages.length && groupSet.has(sourceImages[index].name)) {
+      while (index < sourceImages.length && sameGroup(matchedGroup, groupForImage(sourceImages[index]))) {
         group.push(sourceImages[index]);
         index += 1;
       }
       index -= 1;
-      parts.push(`<div class="neighbor-used-group">${figures(group)}</div>`);
+      parts.push(`<div class="neighbor-context-group ${matchedGroup.current ? "used" : ""}">
+        <div class="neighbor-context-images">${figures(group)}</div>
+        <small>${escapeHtml(matchedGroup.title)}</small>
+      </div>`);
     }
     strip.innerHTML = parts.join("");
     requestAnimationFrame(() => {
