@@ -831,13 +831,17 @@ function renderValidation(validation) {
 
 function renderAnomalyCard(validationId, item, contextGroups = []) {
   const evidence = item.evidence || [];
-  return `<article class="anomaly-card ${escapeHtml(item.severity || "medium")}" data-anomaly-id="${escapeHtml(item.id || "")}">
+  const reviewedStatus = item.saved_note?.status || "";
+  const reviewedClass = ["good", "reviewed", "saved"].includes(reviewedStatus) ? "reviewed" : "";
+  const reviewedLabel = reviewedStatus === "good" ? "looks good" : reviewedStatus === "reviewed" ? "reviewed" : reviewedStatus === "saved" ? "saved" : "";
+  return `<article class="anomaly-card ${escapeHtml(item.severity || "medium")} ${reviewedClass}" data-anomaly-id="${escapeHtml(item.id || "")}">
     <div class="anomaly-head">
       <div>
         <strong>${escapeHtml(item.title || "Validation anomaly")}</strong>
         <div class="message">${escapeHtml(item.why || "")}</div>
       </div>
       <div class="anomaly-tags">
+        ${reviewedLabel ? `<mark class="reviewed">${escapeHtml(reviewedLabel)}</mark>` : ""}
         <mark class="${escapeHtml(item.severity || "medium")}">${escapeHtml(item.severity || "medium")}</mark>
         <mark>${escapeHtml(item.kind || "review")}</mark>
         <mark>conf ${Math.round(Number(item.confidence || 0) * 100)}%</mark>
@@ -949,7 +953,18 @@ async function saveAnomaly(button, status = "saved") {
     body: JSON.stringify(payload),
   });
   if (res.ok) {
+    const label = status === "reviewed" ? "reviewed" : status === "good" ? "looks good" : "saved";
     button.textContent = status === "reviewed" ? "Reviewed" : status === "good" ? "Looks good" : "Saved";
+    card?.classList.add("reviewed");
+    const tags = card?.querySelector(".anomaly-tags");
+    if (tags && !tags.querySelector("mark.reviewed")) {
+      tags.insertAdjacentHTML("afterbegin", `<mark class="reviewed">${escapeHtml(label)}</mark>`);
+    } else {
+      const reviewed = tags?.querySelector("mark.reviewed");
+      if (reviewed) reviewed.textContent = label;
+    }
+    const route = card?.querySelector(".anomaly-route");
+    if (route) route.textContent = `${label} · persisted as validation metadata; future unchanged repeats can be suppressed.`;
     pollValidation();
     pollFeedbackStatus();
   }

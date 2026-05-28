@@ -1594,6 +1594,17 @@ main {
   border-left-color: var(--blue);
 }
 
+.anomaly-card.reviewed {
+  opacity: 0.68;
+  background: rgba(247, 236, 212, 0.55);
+}
+
+.anomaly-card.reviewed .anomaly-head strong {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(109, 106, 102, 0.5);
+}
+
 .anomaly-head {
   display: flex;
   justify-content: space-between;
@@ -1633,6 +1644,11 @@ main {
 .anomaly-tags mark.low {
   background: rgba(30, 99, 143, 0.12);
   color: var(--blue);
+}
+
+.anomaly-tags mark.reviewed {
+  background: rgba(29, 127, 78, 0.13);
+  color: var(--green);
 }
 
 .anomaly-evidence {
