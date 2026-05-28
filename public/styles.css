@@ -2191,14 +2191,13 @@ main {
   cursor: help;
 }
 
-.logic-chip::after {
-  content: attr(data-logic);
+.logic-popover {
   position: absolute;
   left: 10px;
   bottom: calc(100% + 8px);
   display: none;
-  width: min(520px, 82vw);
-  max-height: 260px;
+  width: min(680px, 86vw);
+  max-height: 520px;
   overflow: auto;
   padding: 10px 12px;
   border: 1px solid rgba(30, 99, 143, 0.28);
@@ -2206,18 +2205,107 @@ main {
   background: rgba(255, 253, 247, 0.98);
   box-shadow: 0 18px 48px rgba(52, 39, 19, 0.18);
   color: var(--ink-soft);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.35;
-  text-transform: none;
-  letter-spacing: 0;
-  white-space: normal;
   z-index: 20;
 }
 
-.logic-chip:hover::after,
-.logic-chip:focus::after {
+.logic-chip:hover > .logic-popover,
+.logic-chip:focus > .logic-popover {
   display: block;
+}
+
+.logic-popover-head {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+
+.logic-tree {
+  display: grid;
+  gap: 7px;
+}
+
+.logic-node {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(217, 209, 194, 0.82);
+  border-left: 4px solid var(--blue);
+  border-radius: 9px;
+  background: #fffdf7;
+}
+
+.logic-node b {
+  display: inline-grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+}
+
+.logic-node strong,
+.logic-node span,
+.logic-node em,
+.logic-node p {
+  display: block;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.logic-node strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.logic-node span {
+  margin-top: 2px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.logic-node em {
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.logic-node p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.32;
+}
+
+.logic-popover details {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.logic-popover summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.logic-popover details p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
 }
 
 .solution-cases {

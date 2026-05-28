@@ -1203,6 +1203,63 @@ function logicForSolutionReading(solution, caseItem, reading) {
   return parts.join(" ");
 }
 
+function logicTreeForSolutionReading(solution, caseItem, reading, evidence) {
+  const result = caseItem?.result || {};
+  const oldValue = reading?.old_value ?? evidence?.value ?? "";
+  const newValue = reading?.rechecked_value ?? "";
+  return [
+    {
+      node: "Old extraction leaf",
+      role: "suspect output",
+      value: `${oldValue}`,
+      note: "This is the value that created or belonged to the recorded error case.",
+    },
+    {
+      node: "Evidence leaf",
+      role: "source image check",
+      value: reading?.source_image || evidence?.source_image || "source image",
+      note: "Open the photo and inspect the LCD/sign/decimal directly.",
+    },
+    {
+      node: "Rule gate",
+      role: solution.title || "reusable solution",
+      value: solution.solution || "",
+      note: "Apply the general rule only when the detector conditions match.",
+    },
+    {
+      node: "Replay verifier",
+      role: "current result",
+      value: `${newValue} ${reading?.unit || ""}`.trim(),
+      note: result.summary || "Focused replay decides whether the old error is solved.",
+    },
+    {
+      node: "Prompt memory",
+      role: "future prevention",
+      value: "lesson injected",
+      note: "The reusable lesson and your guidance are available to future extraction/validation leaves.",
+    },
+  ];
+}
+
+function renderLogicTreeTooltip(tree, raw) {
+  return `<div class="logic-popover">
+    <div class="logic-popover-head">Agent logic trace</div>
+    <div class="logic-tree">${tree.map((item, index) => `<div class="logic-node">
+      <b>${index + 1}</b>
+      <div>
+        <strong>${escapeHtml(item.node)}</strong>
+        <span>${escapeHtml(item.role)}</span>
+        <em>${escapeHtml(item.value)}</em>
+        <p>${escapeHtml(item.note)}</p>
+      </div>
+    </div>`).join("")}</div>
+    <details>
+      <summary>Raw trace text</summary>
+      <p>${escapeHtml(raw || "")}</p>
+    </details>
+  </div>`;
+}
+
 function renderSolutionProof(solution) {
   const item = representativeSolutionCase(solution);
   const readings = item?.result?.readings || [];
@@ -1211,6 +1268,7 @@ function renderSolutionProof(solution) {
   const thumb = siteThumbForEvidence(evidence, 720);
   if (!item || !reading) return "";
   const logic = logicForSolutionReading(solution, item, reading);
+  const logicTree = renderLogicTreeTooltip(logicTreeForSolutionReading(solution, item, reading, evidence), logic);
   const oldValue = reading.old_value ?? evidence?.value ?? "";
   const newValue = reading.rechecked_value ?? "";
   return `<div class="solution-proof">
@@ -1226,29 +1284,34 @@ function renderSolutionProof(solution) {
       <div class="proof-trace">
         <div class="trace-case-title">${escapeHtml(item.title || "")}</div>
         <div class="trace-row">
-          <div class="trace-step old logic-chip" data-logic="${escapeHtml(`Original extracted/suspect value. ${logic}`)}" title="${escapeHtml(logic)}">
+          <div class="trace-step old logic-chip">
             <span>old leaf output</span>
             <strong>${escapeHtml(oldValue)}</strong>
+            ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step inspect logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+          <div class="trace-step inspect logic-chip">
             <span>evidence leaf checks</span>
             <strong>${escapeHtml(reading.source_image || evidence?.source_image || "source")}</strong>
+            ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step rule logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+          <div class="trace-step rule logic-chip">
             <span>rule gate decides</span>
             <strong>${escapeHtml(solution.title || "rule")}</strong>
+            ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step corrected logic-chip" data-logic="${escapeHtml(`Replay-corrected/current source-backed value. ${logic}`)}" title="${escapeHtml(logic)}">
+          <div class="trace-step corrected logic-chip">
             <span>replay result</span>
             <strong>${escapeHtml(newValue)} ${escapeHtml(reading.unit || "")}</strong>
+            ${logicTree}
           </div>
         </div>
-        <div class="trace-summary logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+        <div class="trace-summary logic-chip">
           <span>Why this passes now</span>
           <p>${escapeHtml(item.result?.summary || solution.solution || "")}</p>
+          ${logicTree}
         </div>
       </div>
     </div>
