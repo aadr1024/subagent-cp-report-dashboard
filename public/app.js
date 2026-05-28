@@ -1529,17 +1529,18 @@ function cancelFloatingPreviewHide() {
   floatingPreviewHideTimer = null;
 }
 
-function positionFloatingPreview(preview, pointer) {
+function positionFloatingPreview(preview, anchor, pointer) {
   const width = Math.min(860, window.innerWidth - 28);
   const height = Math.min(620, window.innerHeight - 72);
   const margin = 14;
-  const x = Number(pointer?.clientX || window.innerWidth / 2);
-  const y = Number(pointer?.clientY || window.innerHeight / 3);
+  const rect = anchor?.getBoundingClientRect?.();
+  const x = rect ? rect.right : Number(pointer?.clientX || window.innerWidth / 2);
+  const y = rect ? rect.top : Number(pointer?.clientY || window.innerHeight / 3);
   let left = x + margin;
-  if (left + width > window.innerWidth - margin) left = x - width - margin;
+  if (left + width > window.innerWidth - margin) left = (rect ? rect.left : x) - width - margin;
   left = Math.max(margin, Math.min(window.innerWidth - width - margin, left));
-  let top = y + margin;
-  if (top + height > window.innerHeight - margin) top = y - height - margin;
+  let top = y;
+  if (top + height > window.innerHeight - margin) top = window.innerHeight - height - margin;
   top = Math.max(margin, Math.min(window.innerHeight - height - margin, top));
   preview.style.width = `${width}px`;
   preview.style.maxHeight = `${height}px`;
@@ -1577,7 +1578,7 @@ function showAnomalyFloatingPreview(chip, event) {
   activeFloatingPreview = node;
   node.style.display = "block";
   node.classList.add("is-visible");
-  positionFloatingPreview(node, event);
+  positionFloatingPreview(node, chip, event);
   hydrateHoverPreview(node);
   return node;
 }
@@ -1596,7 +1597,7 @@ document.addEventListener("pointerover", handlePreviewHover, true);
 document.addEventListener("mouseover", handlePreviewHover);
 document.addEventListener("mousemove", (event) => {
   const anomalyChip = event.target.closest(".anomaly-chip");
-  if (anomalyChip && activeFloatingPreview) positionFloatingPreview(activeFloatingPreview, event);
+  if (anomalyChip && activeFloatingPreview) cancelFloatingPreviewHide();
 });
 document.addEventListener("mouseout", (event) => {
   if (!activeFloatingPreview) return;
