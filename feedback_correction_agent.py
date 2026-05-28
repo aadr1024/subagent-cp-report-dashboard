@@ -135,7 +135,8 @@ def record_regression(feedback: dict, old: dict, new_value: str) -> None:
         "run_id": feedback.get("run_id"),
         "agent": feedback.get("agent"),
         "title": f"STR {feedback.get('structure')} human feedback corrected upside-down meter reading",
-        "kind": "human_feedback_value_correction",
+        "kind": "meter_orientation_seven_segment",
+        "solution_id": "meter-orientation-seven-segment",
         "severity": "high",
         "note": feedback.get("value"),
         "anomaly": {
@@ -149,7 +150,7 @@ def record_regression(feedback: dict, old: dict, new_value: str) -> None:
                 "label": old.get("annotation_label"),
             }]
         },
-        "next_step": "Future extraction leaves must inspect meter orientation before accepting seven-segment LCD values.",
+        "next_step": "Future extraction leaves must inspect meter orientation before accepting seven-segment LCD values; if orientation is ambiguous, emit a visible review/failure case instead of silently accepting or skipping.",
         "source": "human_feedback_correction_agent",
     }
     append_jsonl(REGRESSION_CASES, item)
@@ -160,7 +161,7 @@ def apply_feedback(feedback: dict) -> dict:
     agent = str(feedback.get("agent") or "")
     correction = corrected_value(str(feedback.get("value") or ""))
     if not run_id or not agent or not correction:
-        return {"status": "skipped", "reason": "feedback did not contain run, agent, and explicit corrected value", "feedback_id": feedback_id(feedback)}
+        return {"status": "failed", "reason": "feedback correction could not be parsed; visible intervention required, not silent skip", "feedback_id": feedback_id(feedback)}
     run_dir = RUNS / run_id
     state_path = run_dir / "state.json"
     leaf_path = run_dir / "leaf-results.json"
@@ -230,7 +231,7 @@ def main() -> None:
         append_jsonl(LEDGER, result)
         append_jsonl(FEEDBACK_PROCESSING, {"kind": "human_feedback_correction_applied", **result})
         results.append(result)
-    status = "complete" if all(item.get("status") in {"corrected", "skipped"} for item in results) else "failed"
+    status = "complete" if all(item.get("status") == "corrected" for item in results) else "failed"
     write_json(STATUS, {"status": status, "agent": "feedback-correction-orchestrator", "updated_at": now(), "processed": len(results), "results": results})
     print(json.dumps({"status": status, "processed": len(results), "results": results}, indent=2))
     if status != "complete":

@@ -13,6 +13,7 @@ RUNS = ROOT / "runs"
 VALIDATIONS = RUNS / "validations"
 GLOBAL_FEEDBACK = RUNS / "global-feedback.jsonl"
 FEEDBACK_CORRECTION_LEDGER = RUNS / "feedback-correction-ledger.jsonl"
+REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 CLOSED_LOOP_LEDGER = RUNS / "closed-loop-clean.jsonl"
 DASHBOARD_HISTORY = RUNS / "dashboard-validation-history.jsonl"
 
@@ -124,7 +125,13 @@ def check_closed_loop_integrity() -> list[dict]:
 def monitored_bug_cases() -> list[dict]:
     validation = latest_validation()
     potential = ((validation.get("agents") or {}).get("potential-sign-validator") or {}).get("message", "")
+    orientation = ((validation.get("agents") or {}).get("meter-orientation-validator") or {}).get("message", "")
+    regressions = read_jsonl(REGRESSION_CASES)
+    has_orientation_case = any(item.get("kind") == "meter_orientation_seven_segment" or item.get("solution_id") == "meter-orientation-seven-segment" for item in regressions)
+    feedback_failures = [item for item in read_jsonl(FEEDBACK_CORRECTION_LEDGER) if item.get("status") == "failed"]
     return [
+        case("meter-orientation-generalized", "Upside-down/rotated seven-segment meter errors must be reusable", "pass" if has_orientation_case and orientation else "fail", orientation or "meter-orientation validator or regression case missing", severity="high", active=not (has_orientation_case and orientation), evidence=[{"has_orientation_case": has_orientation_case, "validator": orientation}]),
+        case("feedback-never-silent-fail", "Feedback correction failures must be visible, never silent", "fail" if feedback_failures else "pass", f"{len(feedback_failures)} feedback correction failure(s)" if feedback_failures else "no silent/failed feedback corrections", severity="high", active=bool(feedback_failures), evidence=feedback_failures[-5:]),
         case("potential-sign-raw-vs-blocking-display", "Potential sign raw flags must not look like current red failures", "monitor", potential or "waiting for validation", severity="medium", evidence=[{"latest_validation": validation.get("validation_id"), "message": potential}]),
         case("dashboard-scroll-stability", "Dashboard panels must preserve scroll/input while polling", "monitor", "tracked from prior validation/feedback panel scroll-reset bugs", severity="medium"),
         case("hover-preview-stability", "Evidence hover previews must stay near anchor and not disappear during scroll", "monitor", "tracked from prior validation hover-preview bugs", severity="medium"),

@@ -32,6 +32,12 @@ const SOLUTION_DEFINITIONS = {
     solution: "Extraction leaves must preserve visible minus signs, bias Table 3/Table 6 potentials negative when the local evidence supports it, and surface truly positive/no-minus readings as polarity anomalies instead of silently forcing them.",
     detection_rule: "Applies to Table 3/Table 6, V DC, minus/negative/positive/polarity notes, and sign-mixed potential evidence.",
   },
+  "meter-orientation-seven-segment": {
+    title: "Meter orientation / seven-segment discipline",
+    problem: "Rotated or upside-down digital multimeter photos can make seven-segment LCD readings read as the wrong number, for example 90 instead of 6.0.",
+    solution: "Extraction and validation leaves must inspect meter orientation before accepting LCD digits; if orientation is rotated/upside-down, mentally rotate the display, re-read decimal/unit indicators, and flag ambiguous cases instead of silently accepting the value.",
+    detection_rule: "Applies to Table 4 shunt-voltage/current readings, upside-down/rotated meter notes, seven-segment LCD ambiguity, and Row 2 shunt values with mA-vs-mV/unit/orientation conflict.",
+  },
   "table4-current-decimal-scale": {
     title: "Current decimal scale",
     problem: "LCD current values can be read as large un-decimaled numbers, for example 6369 instead of 63.69 mA or 295.1 instead of 29.51 mA.",
@@ -549,6 +555,9 @@ function solutionIdForCase(item, result = {}) {
       return "table3-five-reading-completeness";
     }
     return "potential-minus-sign-discipline";
+  }
+  if (/(upside|rotat|orientation|seven[- ]?segment|voltmeter|90\s+instead\s+of\s+6\.0|row\s*2.*\bma\b|shunt.*\bma\b)/.test(caseText)) {
+    return "meter-orientation-seven-segment";
   }
   if ([...agents].some((agent) => agent === "table4-stations" || agent === "table5-currents")
     && /(current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7|295\.1|far from peer|outlier)/.test(caseText)) {

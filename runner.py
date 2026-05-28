@@ -175,6 +175,7 @@ def global_validation_feedback_context() -> str:
         "Table 6 anode open-circuit potentials are normally negative. If the meter appears positive but the context suggests reverse polarity or missing minus, return the negative value and note the sign ambiguity.",
         "Table 4 current readings are normally milliamps (mA), not amps (A). The leading m can be hidden by lighting; normalize current units to mA unless the display unambiguously says A.",
         "Table 4 shunt readings are normally millivolts (mV). If units are unclear for shunt readings, prefer mV and explain uncertainty.",
+        "Before transcribing any digital multimeter LCD, check whether the photo/meter is upside down or rotated. Seven-segment digits can invert into a different number; mentally rotate the display, verify decimal/unit indicators, and flag ambiguity visibly instead of silently accepting.",
         "For Table 4 large LCD numbers such as 6369 or 4386, inspect carefully for a decimal point. These are often 63.69 or 43.86 style current readings, not thousands.",
         "For Table 3 tiny values such as 0.086 where peer values are around 0.8, inspect for a missed digit or decimal position before returning the value.",
         "Do not invent values. If a correction is based on visual ambiguity and domain convention, include notes/confidence so validation can still surface it.",

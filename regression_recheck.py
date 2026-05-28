@@ -30,6 +30,10 @@ SOLUTION_RULES = {
         "title": "Potential sign discipline",
         "prompt": "This replay targets sign discipline: preserve faint LCD minus signs, default Table 3/Table 6 potentials negative when local evidence supports it, and leave true positive/no-minus source readings positive while flagging polarity.",
     },
+    "meter-orientation-seven-segment": {
+        "title": "Meter orientation / seven-segment discipline",
+        "prompt": "This replay targets rotated/upside-down seven-segment LCD readings: inspect meter orientation first, mentally rotate the display if needed, preserve the actual decimal and unit indicators, and treat ambiguous orientation as a visible review issue rather than accepting the old value.",
+    },
     "table4-current-decimal-scale": {
         "title": "Current decimal scale",
         "prompt": "This replay targets current-reading scale: inspect decimal points carefully, read currents as mA, and compare suspicious large integer-like values against nearby current/shunt peers.",
@@ -247,6 +251,8 @@ def solution_id_for_case(case: dict) -> str:
         if re.search(r"five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four", text):
             return "table3-five-reading-completeness"
         return "potential-minus-sign-discipline"
+    if re.search(r"upside|rotat|orientation|seven[- ]?segment|voltmeter|90\s+instead\s+of\s+6\.0|row\s*2.*\bma\b|shunt.*\bma\b", text):
+        return "meter-orientation-seven-segment"
     if any(agent in {"table4-stations", "table5-currents"} for agent in agents) and re.search(r"current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7|295\.1|far from peer|outlier", text):
         return "table4-current-decimal-scale"
     if re.search(r"\btable\s*3\b|table3", text) and re.search(r"five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four", text):
@@ -280,6 +286,7 @@ def prompt_for_case(case: dict, solution_id: str | None = None) -> str:
             "Table 3 and Table 6 potentials are normally negative; preserve visible minus signs and consider reverse polarity/missing minus in notes.",
             "If a Table 3 or Table 6 source image clearly shows no minus sign, do not invent a minus sign; keep the source-backed positive value and flag it as polarity/source-positive review.",
             "Table 4 current readings are normally mA, not A. Table 4 shunt readings are normally mV.",
+            "Before accepting Table 4 LCD digits, inspect whether the meter/photo is rotated or upside down; seven-segment displays can read as a different number when inverted (for example 90 may actually be 6.0).",
             "Large un-decimaled current values like 6369/4386 are likely missed decimal readings if the display visually supports 63.69/43.86.",
             "Tiny Table 3 values around 0.08 beside peers around 0.8 may indicate missed digit/decimal; inspect the LCD carefully.",
         ],

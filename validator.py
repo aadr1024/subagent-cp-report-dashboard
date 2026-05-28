@@ -46,6 +46,7 @@ class ValidationLog:
                 "shape-validator": {"name": "shape-validator", "status": "pending", "message": "Queued"},
                 "potential-sign-validator": {"name": "potential-sign-validator", "status": "pending", "message": "Queued"},
                 "decimal-scale-validator": {"name": "decimal-scale-validator", "status": "pending", "message": "Queued"},
+                "meter-orientation-validator": {"name": "meter-orientation-validator", "status": "pending", "message": "Queued"},
                 "unit-sanity-validator": {"name": "unit-sanity-validator", "status": "pending", "message": "Queued"},
                 "station-pair-validator": {"name": "station-pair-validator", "status": "pending", "message": "Queued"},
                 "docx-review-validator": {"name": "docx-review-validator", "status": "pending", "message": "Queued"},
@@ -325,6 +326,30 @@ def deterministic_flags(dataset: dict, log: ValidationLog) -> list[dict]:
                     ))
     log.agent("decimal-scale-validator", "complete", f"Decimal/scale pass produced {len(flags) - before} flags")
 
+
+    log.agent("meter-orientation-validator", "running", "Checking rotated/upside-down seven-segment LCD risks")
+    before = len(flags)
+    for record in records:
+        if record["agent"] != "table4-stations":
+            continue
+        label_text = " ".join(str(record.get(key) or "") for key in ("row", "station", "notes", "value", "source_image")).lower()
+        unit = str(record.get("unit") or "")
+        numeric = record.get("numeric")
+        is_row2_shunt = "row 2" in label_text or "shunt" in label_text
+        orientation_terms = re.search(r"upside|rotat|orientation|angle|glare|seven[- ]?segment|voltmeter", label_text, re.I)
+        unit_conflict = is_row2_shunt and re.search(r"ma|amp", unit, re.I)
+        suspicious_digit = is_row2_shunt and numeric is not None and abs(numeric) >= 50 and re.search(r"[069]", str(record.get("value") or ""))
+        if orientation_terms or unit_conflict or suspicious_digit:
+            flags.append(anomaly(
+                "meter_orientation_seven_segment",
+                "high" if unit_conflict or orientation_terms else "medium",
+                f"STR {record['structure']} Table 4 shunt/meter reading may be orientation-sensitive",
+                "Rotated/upside-down seven-segment LCDs can produce a wrong transcription. Re-orient the meter image, verify decimal/unit indicators, and do not silently accept the old value.",
+                [record],
+                0.9 if unit_conflict or orientation_terms else 0.78,
+            ))
+    log.agent("meter-orientation-validator", "complete", f"Meter orientation pass produced {len(flags) - before} flags")
+
     log.agent("unit-sanity-validator", "running", "Checking table/unit consistency anomalies")
     before = len(flags)
     for record in records:
@@ -384,6 +409,7 @@ def llm_review(dataset: dict, preflags: list[dict], log: ValidationLog) -> list[
             "Table 3 rows with missing/extra values",
             "sign abnormalities compared with neighboring structures or same table leaf",
             "magnitude outliers",
+            "rotated/upside-down seven-segment LCD orientation errors, especially Table 4 shunt readings where 90 may actually be 6.0",
             "station/anode pairing mismatches across Table 4/5/6",
             "unit or label oddities",
             "low confidence values that also look structurally suspicious",
@@ -586,6 +612,8 @@ def anomaly_review_class(item: dict) -> str:
     text = " ".join(str(item.get(key) or "").lower() for key in ("kind", "title", "why", "note", "status", "error_class"))
     if any(token in text for token in ("sign", "polarity", "minus", "positive", "negative", "potential", "v dc")):
         return "potential_sign"
+    if any(token in text for token in ("upside", "rotat", "orientation", "seven-segment", "voltmeter")):
+        return "meter_orientation"
     if any(token in text for token in ("decimal", "magnitude", "scale", "outlier", "dropped digit")):
         return "magnitude_scale"
     if any(token in text for token in ("unit", "ma", "mv", "dc", "amp", "volt")):
