@@ -222,6 +222,24 @@ def check_locked_cell_drift() -> dict:
     return case("locked-docx-cell-drift-monitor", "Locked DOCX cells must never change silently", "pass", f"{locked} locked cell(s) monitored; no drift/attempted overwrite", severity="high")
 
 
+def check_docx_source_of_truth_mode() -> dict:
+    payload = docx_review.build_payload()
+    source = payload.get("source_of_truth") or {}
+    active = str(payload.get("active_docx") or source.get("active_docx") or "")
+    original = str(source.get("original_docx") or "")
+    active_exists = bool(payload.get("active_docx_exists"))
+    bad = []
+    if not active_exists:
+        bad.append("active final DOCX missing")
+    if active and original and active == original:
+        bad.append("active DOCX equals original DOCX")
+    if not active:
+        bad.append("active DOCX path missing")
+    if bad:
+        return case("docx-review-source-of-truth-active-docx", "DOCX Review must read only the active final DOCX", "fail", "; ".join(bad), severity="high", active=True, evidence=[{"active_docx": active, "original_docx": original, "active_docx_exists": active_exists}])
+    return case("docx-review-source-of-truth-active-docx", "DOCX Review must read only the active final DOCX", "pass", "DOCX Review is backed by active final DOCX readback; original DOCX is not the active path", severity="high", evidence=[{"active_docx": active, "original_docx": original, "active_docx_exists": active_exists}])
+
+
 def check_closed_loop_integrity() -> list[dict]:
     entries = read_jsonl(CLOSED_LOOP_LEDGER)
     bad_clean = [
@@ -284,6 +302,7 @@ def build_payload(selected_case: str | None = None, record: bool = False) -> dic
     for result in [
         guarded("feedback-corrections", check_feedback_corrections),
         guarded("docx-review", check_docx_review),
+        guarded("docx-source-of-truth", check_docx_source_of_truth_mode),
         guarded("anode-count", check_anode_count_guard),
         guarded("locked-cells", check_locked_cell_drift),
         guarded("closed-loop", check_closed_loop_integrity),

@@ -1713,6 +1713,19 @@ main {
   text-align: left;
 }
 
+.docx-row-actions {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.docx-row-actions .small-btn {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 9px;
+  border-radius: 999px;
+}
+
 .docx-word-table thead th {
   text-align: center;
   color: var(--muted);

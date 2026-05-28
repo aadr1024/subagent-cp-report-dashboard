@@ -72,8 +72,6 @@ fs.mkdirSync(THUMBS, { recursive: true });
 fs.mkdirSync(VALIDATIONS, { recursive: true });
 fs.mkdirSync(REGRESSION_RECHECKS, { recursive: true });
 
-let docxReviewCache = { key: "", at: 0, payload: null };
-
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -167,12 +165,6 @@ function docxReviewInputMtime() {
 
 function docxReviewPayload() {
   const source = reportSourceOfTruth();
-  const docxMtime = source.active_exists ? fs.statSync(source.active_docx).mtimeMs : 0;
-  const inputMtime = docxReviewInputMtime();
-  const key = `${docxMtime}:${inputMtime}`;
-  if (docxReviewCache.payload && docxReviewCache.key === key && Date.now() - docxReviewCache.at < 2500) {
-    return { ...docxReviewCache.payload, cached: true };
-  }
   const python = process.env.PYTHON || "python3";
   const result = spawnSync(python, [DOCX_REVIEW_SCRIPT], {
     cwd: ROOT,
@@ -191,8 +183,7 @@ function docxReviewPayload() {
     };
   }
   const payload = JSON.parse(result.stdout || "{}");
-  docxReviewCache = { key, at: Date.now(), payload };
-  return { ...payload, cached: false };
+  return { ...payload, cached: false, source_of_truth_mode: "active_docx_readback_only" };
 }
 
 function dashboardValidationPayload(url) {
@@ -839,7 +830,6 @@ async function saveDocxReviewFeedback(req, res) {
     status: item.status,
     value: item.feedback,
   }) + "\n");
-  docxReviewCache = { key: "", at: 0, payload: null };
   json(res, 200, { ok: true, item });
 }
 
@@ -872,7 +862,6 @@ async function saveDocxCellLock(req, res) {
     value: item.locked_value,
     lock_key: item.lock_key,
   }) + "\n");
-  docxReviewCache = { key: "", at: 0, payload: null };
   json(res, 200, { ok: true, item });
 }
 
