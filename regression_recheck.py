@@ -13,6 +13,8 @@ sys.path.insert(0, "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2
 
 from sba_report_tool.openai_api import as_input_image, create_response, response_text
 
+from correction_promoter import promote_results
+
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -338,6 +340,13 @@ def main() -> None:
             log.state["results"].append(result)
             log.state["cases_done"] = len(log.state["results"])
             log.write()
+            promotion = promote_results([result], apply_docx=True)
+            log.state.setdefault("docx_promotions", []).append(promotion)
+            log.state["docx_promotions"] = log.state["docx_promotions"][-40:]
+            log.write()
+            promoted = promotion.get("candidate_count", 0)
+            if promoted:
+                log.event("docx_promotion", f"Promoted {promoted} corrected value(s) into run data and final DOCX", promotion=promotion)
             log.event("case_complete", f"{result.get('status')}: {result.get('title')}", case_id=result.get("case_id"), status=result.get("status"))
         (run_dir / "results.json").write_text(json.dumps(log.state["results"], indent=2) + "\n")
         log.finish("complete", "Focused regression recheck complete")
