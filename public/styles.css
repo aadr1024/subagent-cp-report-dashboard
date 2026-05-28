@@ -1653,6 +1653,18 @@ main {
   font-size: 11px;
 }
 
+.anomaly-chip.has-preview {
+  cursor: zoom-in;
+}
+
+.anomaly-chip.has-preview:hover,
+.anomaly-chip.has-preview:focus {
+  outline: 2px solid rgba(30, 99, 143, 0.28);
+  outline-offset: 2px;
+  border-color: rgba(30, 99, 143, 0.32);
+  background: rgba(30, 99, 143, 0.055);
+}
+
 .anomaly-chip span,
 .anomaly-chip small {
   color: var(--muted);

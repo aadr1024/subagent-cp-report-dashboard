@@ -900,20 +900,16 @@ function renderAnomalyEvidence(item, allEvidence = [], validationContextGroups =
     ...group,
     current: group.sources.includes(image),
   }));
-  return `<div class="anomaly-chip">
+  const previewTitle = `STR ${item.structure || "?"} · ${item.agent || ""} · ${item.value ?? ""}`;
+  return `<div class="anomaly-chip ${href ? "has-preview" : "no-preview"}" tabindex="0"
+    data-preview-src="${escapeHtml(href)}"
+    data-preview-title="${escapeHtml(previewTitle)}"
+    data-neighborhood="${escapeHtml(neighborhood)}"
+    data-context-groups="${escapeHtml(JSON.stringify(contextGroups))}">
     <strong>STR ${escapeHtml(item.structure || "?")}</strong>
     <span>${escapeHtml(item.agent || "")}</span>
     <mark>${escapeHtml(item.value ?? "")}</mark>
     ${image ? `<small>${escapeHtml(image)}</small>` : ""}
-    ${href ? `<template class="anomaly-preview-template"><div class="hover-preview anomaly-preview floating-preview" data-neighborhood="${escapeHtml(neighborhood)}">
-      <div class="hover-current">
-        <img data-src="${href}" alt="${escapeHtml(image)}" decoding="async" fetchpriority="low" />
-        <div>STR ${escapeHtml(item.structure || "?")} · ${escapeHtml(item.agent || "")} · ${escapeHtml(item.value ?? "")}</div>
-      </div>
-      <div class="neighbor-strip" data-context-groups="${escapeHtml(JSON.stringify(contextGroups))}">
-        <div class="neighbor-loading">hover: loading validation image context</div>
-      </div>
-    </div></template>` : ""}
   </div>`;
 }
 
@@ -1532,7 +1528,7 @@ function cancelFloatingPreviewHide() {
 }
 
 function positionFloatingPreview(preview, pointer) {
-  const width = Math.min(1040, window.innerWidth - 36);
+  const width = Math.min(860, window.innerWidth - 28);
   const height = Math.min(620, window.innerHeight - 72);
   const margin = 14;
   const x = Number(pointer?.clientX || window.innerWidth / 2);
@@ -1550,12 +1546,23 @@ function positionFloatingPreview(preview, pointer) {
 }
 
 function showAnomalyFloatingPreview(chip, event) {
-  const template = chip?.querySelector(".anomaly-preview-template");
-  if (!template) return null;
-  if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor) return activeFloatingPreview;
+  if (!chip?.dataset.previewSrc) return null;
+  if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor) {
+    positionFloatingPreview(activeFloatingPreview, event);
+    return activeFloatingPreview;
+  }
   hideFloatingPreview();
   if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
-  const node = template.content.firstElementChild.cloneNode(true);
+  const node = document.createElement("div");
+  node.className = "hover-preview anomaly-preview floating-preview";
+  node.dataset.neighborhood = chip.dataset.neighborhood || "";
+  node.innerHTML = `<div class="hover-current">
+      <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" decoding="async" fetchpriority="low" />
+      <div>${escapeHtml(chip.dataset.previewTitle || "validation evidence")}</div>
+    </div>
+    <div class="neighbor-strip" data-context-groups="${escapeHtml(chip.dataset.contextGroups || "[]")}">
+      <div class="neighbor-loading">hover: loading validation image context</div>
+    </div>`;
   node.dataset.anchorId = chip.dataset.previewAnchor;
   node.addEventListener("mouseenter", cancelFloatingPreviewHide);
   node.addEventListener("mouseleave", scheduleFloatingPreviewHide);
@@ -1566,7 +1573,7 @@ function showAnomalyFloatingPreview(chip, event) {
   return node;
 }
 
-document.addEventListener("mouseover", async (event) => {
+function handlePreviewHover(event) {
   const chip = event.target.closest(".reading-chip");
   const anomalyChip = event.target.closest(".anomaly-chip");
   if (anomalyChip) cancelFloatingPreviewHide();
@@ -1574,7 +1581,10 @@ document.addEventListener("mouseover", async (event) => {
   const leaf = event.target.closest(".leaf-card");
   if (leaf || chip || preview || anomalyChip) deferRenderUntil = Date.now() + 1800;
   hydrateHoverPreview(preview);
-});
+}
+
+document.addEventListener("pointerover", handlePreviewHover, true);
+document.addEventListener("mouseover", handlePreviewHover);
 document.addEventListener("mousemove", (event) => {
   const anomalyChip = event.target.closest(".anomaly-chip");
   if (anomalyChip && activeFloatingPreview) positionFloatingPreview(activeFloatingPreview, event);
