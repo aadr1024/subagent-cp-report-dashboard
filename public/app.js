@@ -21,6 +21,7 @@ let activityEvents = [];
 let activityRuns = [];
 let activityUpdatedAt = null;
 let latestValidation = null;
+let activeFloatingPreview = null;
 
 function loadFeedbackConsole() {
   try {
@@ -899,7 +900,7 @@ function renderAnomalyEvidence(item, allEvidence = [], validationContextGroups =
     <span>${escapeHtml(item.agent || "")}</span>
     <mark>${escapeHtml(item.value ?? "")}</mark>
     ${image ? `<small>${escapeHtml(image)}</small>` : ""}
-    ${href ? `<div class="hover-preview anomaly-preview" data-neighborhood="${escapeHtml(neighborhood)}">
+    ${href ? `<template class="anomaly-preview-template"><div class="hover-preview anomaly-preview floating-preview" data-neighborhood="${escapeHtml(neighborhood)}">
       <div class="hover-current">
         <img data-src="${href}" alt="${escapeHtml(image)}" decoding="async" fetchpriority="low" />
         <div>STR ${escapeHtml(item.structure || "?")} · ${escapeHtml(item.agent || "")} · ${escapeHtml(item.value ?? "")}</div>
@@ -907,7 +908,7 @@ function renderAnomalyEvidence(item, allEvidence = [], validationContextGroups =
       <div class="neighbor-strip" data-context-groups="${escapeHtml(JSON.stringify(contextGroups))}">
         <div class="neighbor-loading">hover: loading validation image context</div>
       </div>
-    </div>` : ""}
+    </div></template>` : ""}
   </div>`;
 }
 
@@ -1408,14 +1409,57 @@ async function hydrateHoverPreview(preview) {
   } catch {}
 }
 
+function hideFloatingPreview() {
+  if (!activeFloatingPreview) return;
+  activeFloatingPreview.remove();
+  activeFloatingPreview = null;
+}
+
+function positionFloatingPreview(preview, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  const width = Math.min(1180, window.innerWidth - 48);
+  preview.style.width = `${width}px`;
+  preview.style.left = `${Math.max(24, Math.min(window.innerWidth - width - 24, rect.left))}px`;
+  const below = rect.bottom + 10;
+  const maxTop = Math.max(72, window.innerHeight - Math.min(620, window.innerHeight - 96));
+  preview.style.top = `${below < window.innerHeight - 260 ? below : maxTop}px`;
+}
+
+function showAnomalyFloatingPreview(chip) {
+  const template = chip?.querySelector(".anomaly-preview-template");
+  if (!template) return null;
+  if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor) return activeFloatingPreview;
+  hideFloatingPreview();
+  if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
+  const node = template.content.firstElementChild.cloneNode(true);
+  node.dataset.anchorId = chip.dataset.previewAnchor;
+  document.body.appendChild(node);
+  activeFloatingPreview = node;
+  positionFloatingPreview(node, chip);
+  hydrateHoverPreview(node);
+  return node;
+}
+
 document.addEventListener("mouseover", async (event) => {
   const chip = event.target.closest(".reading-chip");
   const anomalyChip = event.target.closest(".anomaly-chip");
-  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? anomalyChip.querySelector(".hover-preview") : event.target.closest(".hover-preview");
+  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip) : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
   if (leaf || chip || preview || anomalyChip) deferRenderUntil = Date.now() + 1800;
   hydrateHoverPreview(preview);
 });
+document.addEventListener("mousemove", (event) => {
+  const anomalyChip = event.target.closest(".anomaly-chip");
+  if (anomalyChip && activeFloatingPreview) positionFloatingPreview(activeFloatingPreview, anomalyChip);
+});
+document.addEventListener("mouseout", (event) => {
+  if (!activeFloatingPreview) return;
+  const next = event.relatedTarget;
+  if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".floating-preview"))) return;
+  hideFloatingPreview();
+});
+window.addEventListener("scroll", hideFloatingPreview, { passive: true });
+window.addEventListener("resize", hideFloatingPreview, { passive: true });
 loadStructures();
 renderFeedbackConsole();
 poll();

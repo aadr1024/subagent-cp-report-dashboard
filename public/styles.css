@@ -1686,19 +1686,17 @@ main {
 }
 
 .anomaly-chip .hover-preview {
+  display: none;
+}
+
+.floating-preview {
+  display: block;
   position: fixed;
-  left: max(24px, calc((100vw - min(1360px, calc(100vw - 100px))) / 2));
-  top: 96px;
-  width: min(1360px, calc(100vw - 100px));
-  max-height: calc(100vh - 128px);
+  max-height: calc(100vh - 96px);
   overflow: auto;
   text-align: left;
   z-index: 120;
-}
-
-.anomaly-chip:hover .hover-preview,
-.anomaly-chip:focus-within .hover-preview {
-  display: block;
+  pointer-events: auto;
 }
 
 .anomaly-actions {
