@@ -1952,69 +1952,86 @@ main {
   color: var(--yellow);
 }
 
-.solution-body {
+.solution-agent-map {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.75fr);
-  gap: 10px;
-}
-
-.solution-explanation {
-  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 8px;
 }
 
-.solution-explanation div {
-  padding: 9px;
-  border: 1px solid rgba(217, 209, 194, 0.8);
-  border-radius: 10px;
-  background: rgba(247, 236, 212, 0.42);
+.agent-flow-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  min-height: 132px;
+  padding: 10px;
+  border: 1px solid rgba(217, 209, 194, 0.86);
+  border-top: 5px solid var(--gray);
+  border-radius: 13px;
+  background: #fffdf7;
 }
 
-.solution-explanation span {
+.agent-flow-node:not(:last-child)::after {
+  content: "->";
+  position: absolute;
+  right: -13px;
+  top: 50%;
+  translate: 0 -50%;
+  z-index: 2;
+  color: var(--blue);
+  font-weight: 800;
+  font-size: 14px;
+}
+
+.agent-flow-node.input {
+  border-top-color: var(--blue);
+}
+
+.agent-flow-node.leaf {
+  border-top-color: var(--yellow);
+}
+
+.agent-flow-node.gate {
+  border-top-color: var(--red);
+}
+
+.agent-flow-node.verify {
+  border-top-color: var(--green);
+}
+
+.agent-flow-node.memory {
+  border-top-color: var(--ink-soft);
+}
+
+.agent-flow-node b {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 12px;
+}
+
+.agent-flow-node strong {
+  display: block;
+  font-size: 12px;
+}
+
+.agent-flow-node span {
+  display: block;
+  margin-top: 3px;
   color: var(--blue);
   font-size: 10px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
-.solution-explanation p {
-  margin: 4px 0 0;
-  color: var(--ink-soft);
-  line-height: 1.35;
-}
-
-.solution-graph {
-  display: grid;
-  gap: 6px;
-  align-content: start;
-}
-
-.solution-graph div {
-  display: grid;
-  grid-template-columns: 24px 1fr;
-  gap: 7px;
-  align-items: start;
-  padding: 7px;
-  border: 1px solid rgba(30, 99, 143, 0.16);
-  border-radius: 9px;
-  background: rgba(30, 99, 143, 0.05);
-}
-
-.solution-graph b {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  background: var(--blue);
-  color: #fff;
-  font-size: 11px;
-}
-
-.solution-graph span {
+.agent-flow-node p {
+  margin: 6px 0 0;
   color: var(--muted);
-  line-height: 1.3;
+  font-size: 11px;
+  line-height: 1.32;
 }
 
 .solution-lessons {
@@ -2025,25 +2042,6 @@ main {
   border: 1px solid rgba(30, 99, 143, 0.14);
   background: rgba(30, 99, 143, 0.06);
   color: var(--blue);
-}
-
-.solution-section-guide {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(160px, 1fr));
-  gap: 7px;
-}
-
-.solution-section-guide span {
-  padding: 7px 8px;
-  border: 1px solid rgba(217, 209, 194, 0.78);
-  border-radius: 9px;
-  background: rgba(247, 236, 212, 0.34);
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.solution-section-guide strong {
-  color: var(--ink-soft);
 }
 
 .solution-proof {
@@ -2105,15 +2103,41 @@ main {
   font-size: 10px;
 }
 
-.proof-values {
+.proof-trace {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr);
-  gap: 8px;
-  align-content: start;
+  gap: 9px;
 }
 
-.proof-value,
-.proof-logic {
+.trace-case-title {
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(247, 236, 212, 0.55);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trace-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) 18px minmax(120px, 1fr) 18px minmax(120px, 1fr) 18px minmax(110px, 1fr);
+  gap: 7px;
+  align-items: stretch;
+}
+
+.trace-row i {
+  display: grid;
+  place-items: center;
+  color: var(--blue);
+  font-style: normal;
+}
+
+.trace-row i::before {
+  content: "->";
+  font-weight: 800;
+}
+
+.trace-step,
+.trace-summary {
   position: relative;
   display: grid;
   gap: 5px;
@@ -2123,16 +2147,24 @@ main {
   background: #fffdf7;
 }
 
-.proof-value.old {
+.trace-step.old {
   border-left: 5px solid var(--red);
 }
 
-.proof-value.corrected {
+.trace-step.inspect {
+  border-left: 5px solid var(--yellow);
+}
+
+.trace-step.rule {
+  border-left: 5px solid var(--blue);
+}
+
+.trace-step.corrected {
   border-left: 5px solid var(--green);
 }
 
-.proof-value span,
-.proof-logic span {
+.trace-step span,
+.trace-summary span {
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
@@ -2140,23 +2172,16 @@ main {
   letter-spacing: 0.06em;
 }
 
-.proof-value strong {
-  font-size: 20px;
+.trace-step strong {
+  font-size: 16px;
+  overflow-wrap: anywhere;
 }
 
-.proof-arrow {
-  display: grid;
-  place-items: center;
-  color: var(--blue);
-  font-weight: 700;
+.trace-summary {
+  border-left: 5px solid var(--green);
 }
 
-.proof-logic {
-  grid-column: 1 / -1;
-  border-left: 5px solid var(--yellow);
-}
-
-.proof-logic p {
+.trace-summary p {
   margin: 0;
   color: var(--ink-soft);
   line-height: 1.35;
@@ -2515,8 +2540,7 @@ main {
   .feedback-life-grid,
   .validation-explain,
   .solution-summary,
-  .solution-body,
-  .solution-section-guide,
+  .solution-agent-map,
   .proof-grid,
   .validation-workbench,
   .stats-grid,
@@ -2539,12 +2563,13 @@ main {
     grid-template-columns: 1fr;
   }
 
-  .proof-values {
-    grid-template-columns: 1fr;
-  }
-
-  .proof-arrow {
-    justify-content: start;
+  .agent-flow-node:not(:last-child)::after {
+    content: "down";
+    right: 12px;
+    top: auto;
+    bottom: -16px;
+    translate: 0;
+    font-size: 10px;
   }
 
   .anomaly-head {
@@ -2598,5 +2623,18 @@ main {
     bottom: 164px;
     width: min(86vw, 360px);
     max-height: 220px;
+  }
+
+  .trace-row {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-row i {
+    justify-content: start;
+  }
+
+  .trace-row i::before {
+    content: "down";
+    font-size: 10px;
   }
 }

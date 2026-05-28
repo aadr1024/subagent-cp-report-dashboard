@@ -1136,18 +1136,12 @@ function renderSolutionCard(solution) {
         ${counts.needs_review ? `<mark class="hot">${counts.needs_review} review</mark>` : ""}
       </div>
     </div>
-    <div class="solution-body">
-      <div class="solution-explanation">
-        <div><span>Reusable fix</span><p>${escapeHtml(solution.solution || "")}</p></div>
-        <div><span>Detection rule</span><p>${escapeHtml(solution.detection_rule || "")}</p></div>
-        <div><span>Replay target</span><p>${escapeHtml(solution.latest_recheck_id ? `latest replay ${solution.latest_recheck_id}` : "not replayed yet")}</p></div>
-      </div>
-      <div class="solution-graph">${graph.map((step, index) => `<div><b>${index + 1}</b><span>${escapeHtml(step)}</span></div>`).join("")}</div>
-    </div>
-    <div class="solution-section-guide">
-      <span><strong>Fix</strong> = behavior the next leaf agents should follow.</span>
-      <span><strong>Detection</strong> = when this behavior should trigger.</span>
-      <span><strong>Replay</strong> = proof run showing the recorded cases now pass.</span>
+    <div class="solution-agent-map">
+      ${renderSolutionAgentNode("1", "Detector agent", "When does this rule wake up?", solution.detection_rule || "", "input")}
+      ${renderSolutionAgentNode("2", "Evidence leaf", "What does the image actually show?", "Open the source photo, zoom the meter/LCD, and read only visible evidence.", "leaf")}
+      ${renderSolutionAgentNode("3", "Rule gate", "Which reusable rule wins?", solution.solution || "", "gate")}
+      ${renderSolutionAgentNode("4", "Replay verifier", "Did the old error disappear?", solution.latest_recheck_id ? `Latest replay: ${solution.latest_recheck_id}` : "Waiting for replay proof.", "verify")}
+      ${renderSolutionAgentNode("5", "Prompt memory", "What changes next run?", "Lessons and your guidance are injected into future extraction/validation leaves.", "memory")}
     </div>
     ${renderSolutionProof(solution)}
     ${lessons.length ? `<div class="solution-lessons">${lessons.map((lesson) => `<mark>${escapeHtml(lesson)}</mark>`).join("")}</div>` : ""}
@@ -1166,6 +1160,17 @@ function renderSolutionCard(solution) {
       <small>Runs only matching recorded cases through the focused OpenAI recheck leaf.</small>
     </div>
   </article>`;
+}
+
+function renderSolutionAgentNode(index, title, question, answer, kind) {
+  return `<div class="agent-flow-node ${escapeHtml(kind || "")}">
+    <b>${escapeHtml(index)}</b>
+    <div>
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(question)}</span>
+      <p>${escapeHtml(answer)}</p>
+    </div>
+  </div>`;
 }
 
 function representativeSolutionCase(solution) {
@@ -1210,26 +1215,39 @@ function renderSolutionProof(solution) {
   const newValue = reading.rechecked_value ?? "";
   return `<div class="solution-proof">
     <div class="proof-head">
-      <strong>Representative replay case</strong>
-      <span>${escapeHtml(item.title || "")}</span>
+      <strong>Trace one replay case</strong>
+      <span>follow the value through the agent nodes</span>
     </div>
     <div class="proof-grid">
       <figure class="proof-image">
         ${thumb ? `<img src="${escapeHtml(thumb)}" alt="${escapeHtml(reading.source_image || evidence?.source_image || "evidence")}" loading="lazy" decoding="async" fetchpriority="low" />` : `<div class="proof-image-missing">image unavailable</div>`}
         <figcaption>STR ${escapeHtml(evidence?.structure || item.evidence?.structures?.[0] || "?")} · ${escapeHtml(reading.source_image || evidence?.source_image || "")}</figcaption>
       </figure>
-      <div class="proof-values">
-        <div class="proof-value old logic-chip" data-logic="${escapeHtml(`Original extracted/suspect value. ${logic}`)}" title="${escapeHtml(logic)}">
-          <span>Old extraction</span>
-          <strong>${escapeHtml(oldValue)}</strong>
+      <div class="proof-trace">
+        <div class="trace-case-title">${escapeHtml(item.title || "")}</div>
+        <div class="trace-row">
+          <div class="trace-step old logic-chip" data-logic="${escapeHtml(`Original extracted/suspect value. ${logic}`)}" title="${escapeHtml(logic)}">
+            <span>old leaf output</span>
+            <strong>${escapeHtml(oldValue)}</strong>
+          </div>
+          <i></i>
+          <div class="trace-step inspect logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+            <span>evidence leaf checks</span>
+            <strong>${escapeHtml(reading.source_image || evidence?.source_image || "source")}</strong>
+          </div>
+          <i></i>
+          <div class="trace-step rule logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+            <span>rule gate decides</span>
+            <strong>${escapeHtml(solution.title || "rule")}</strong>
+          </div>
+          <i></i>
+          <div class="trace-step corrected logic-chip" data-logic="${escapeHtml(`Replay-corrected/current source-backed value. ${logic}`)}" title="${escapeHtml(logic)}">
+            <span>replay result</span>
+            <strong>${escapeHtml(newValue)} ${escapeHtml(reading.unit || "")}</strong>
+          </div>
         </div>
-        <div class="proof-arrow">-></div>
-        <div class="proof-value corrected logic-chip" data-logic="${escapeHtml(`Replay-corrected/current source-backed value. ${logic}`)}" title="${escapeHtml(logic)}">
-          <span>Replay result</span>
-          <strong>${escapeHtml(newValue)} ${escapeHtml(reading.unit || "")}</strong>
-        </div>
-        <div class="proof-logic logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
-          <span>Logic used</span>
+        <div class="trace-summary logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+          <span>Why this passes now</span>
           <p>${escapeHtml(item.result?.summary || solution.solution || "")}</p>
         </div>
       </div>
