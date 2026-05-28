@@ -29,6 +29,7 @@ let floatingPreviewHideTimer = null;
 let latestFeedbackStatus = null;
 let latestRegressionCases = [];
 let anomalyFloatingPreview = null;
+const anomalyNoteDrafts = new Map();
 
 function loadFeedbackConsole() {
   try {
@@ -603,7 +604,14 @@ function dashboardScrollSnapshot() {
 }
 
 function scrollablePanelBusy() {
-  return Date.now() < scrollablePanelQuietUntil;
+  return Date.now() < scrollablePanelQuietUntil || editingDashboardPanel();
+}
+
+function editingDashboardPanel() {
+  const active = document.activeElement;
+  if (!active) return false;
+  if (!active.closest?.("#validationPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
+  return active.matches("input, textarea, select, [contenteditable='true']");
 }
 
 function markScrollablePanelBusy(event) {
@@ -859,6 +867,7 @@ function renderAnomalyCard(validationId, item, contextGroups = []) {
   const reviewedStatus = item.saved_note?.status || "";
   const reviewedClass = ["good", "reviewed", "saved"].includes(reviewedStatus) ? "reviewed" : "";
   const reviewedLabel = reviewedStatus === "good" ? "looks good" : reviewedStatus === "reviewed" ? "reviewed" : reviewedStatus === "saved" ? "saved" : "";
+  const draftNote = anomalyNoteDrafts.has(item.id) ? anomalyNoteDrafts.get(item.id) : item.saved_note?.note || "";
   return `<article class="anomaly-card ${escapeHtml(item.severity || "medium")} ${reviewedClass}" data-anomaly-id="${escapeHtml(item.id || "")}">
     <div class="anomaly-head">
       <div>
@@ -874,7 +883,7 @@ function renderAnomalyCard(validationId, item, contextGroups = []) {
     </div>
     <div class="anomaly-evidence">${evidence.map((evidenceItem) => renderAnomalyEvidence(evidenceItem, evidence, contextGroups)).join("")}</div>
     <div class="anomaly-actions">
-      <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(item.saved_note?.note || "")}" />
+      <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(draftNote)}" />
       <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved" : "Save"}</button>
       <button class="small-btn good-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Good job</button>
       <button class="small-btn mark-reviewed" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Mark reviewed</button>
@@ -978,6 +987,7 @@ async function saveAnomaly(button, status = "saved") {
     body: JSON.stringify(payload),
   });
   if (res.ok) {
+    anomalyNoteDrafts.delete(payload.anomaly_id);
     const label = status === "reviewed" ? "reviewed" : status === "good" ? "looks good" : "saved";
     button.textContent = status === "reviewed" ? "Reviewed" : status === "good" ? "Looks good" : "Saved";
     card?.classList.add("reviewed");
@@ -1474,6 +1484,14 @@ document.addEventListener("click", (event) => {
   if (regression) recordRegressionCase(regression);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
+});
+document.addEventListener("input", (event) => {
+  const input = event.target.closest(".anomaly-note-input");
+  if (!input) return;
+  const card = input.closest(".anomaly-card");
+  if (!card?.dataset.anomalyId) return;
+  anomalyNoteDrafts.set(card.dataset.anomalyId, input.value);
+  scrollablePanelQuietUntil = Date.now() + 5000;
 });
 document.addEventListener("keydown", (event) => {
   const quick = event.target.closest(".quick-feedback textarea");
