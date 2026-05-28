@@ -11,6 +11,9 @@ const CURRENT = path.join(RUNS, "current-run.txt");
 const GLOBAL_FEEDBACK = path.join(RUNS, "global-feedback.jsonl");
 const THUMBS = path.join(RUNS, ".thumbs");
 const VALIDATIONS = path.join(RUNS, "validations");
+const VALIDATION_REVIEW_METADATA = path.join(RUNS, "validation-review-metadata.jsonl");
+const FEEDBACK_PROCESSING = path.join(RUNS, "feedback-processing.jsonl");
+const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 
@@ -294,6 +297,23 @@ function validationPayload() {
   };
 }
 
+function feedbackStatus() {
+  const extraction = readJsonLines(GLOBAL_FEEDBACK);
+  const validation = readJsonLines(VALIDATION_REVIEW_METADATA);
+  const processed = readJsonLines(FEEDBACK_PROCESSING);
+  return {
+    updated_at: new Date().toISOString(),
+    counts: {
+      extraction_feedback: extraction.length,
+      validation_reviews: validation.length,
+      processed_events: processed.length,
+    },
+    recent_extraction: extraction.slice(-12).reverse(),
+    recent_validation: validation.slice(-12).reverse(),
+    recent_processed: processed.slice(-18).reverse(),
+  };
+}
+
 function startValidation(req, res) {
   const python = process.env.PYTHON || "python3";
   const validationId = `${stamp()}-validation`;
@@ -322,15 +342,65 @@ async function saveValidationNote(req, res) {
   const validationId = String(payload.validation_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
   const dir = path.join(VALIDATIONS, validationId);
   if (!validationId || !dir.startsWith(VALIDATIONS) || !fs.existsSync(dir)) return json(res, 404, { error: "unknown validation" });
+  const state = readJsonFile(path.join(dir, "state.json"), {});
+  const anomaly = (state.anomalies || []).find((item) => item.id === String(payload.anomaly_id || "")) || {};
   const note = {
     at: new Date().toISOString(),
     validation_id: validationId,
     anomaly_id: String(payload.anomaly_id || ""),
+    signature: anomaly.signature || null,
+    evidence_hash: anomaly.evidence_hash || null,
     status: payload.status || "saved",
     note: payload.note || "",
   };
   fs.appendFileSync(path.join(dir, "notes.jsonl"), JSON.stringify(note) + "\n");
+  fs.appendFileSync(VALIDATION_REVIEW_METADATA, JSON.stringify(note) + "\n");
   json(res, 200, { ok: true, note });
+}
+
+function regressionCases() {
+  const cases = readJsonLines(REGRESSION_CASES);
+  const latestBySignature = new Map();
+  for (const item of cases) {
+    latestBySignature.set(item.signature || item.case_id, item);
+  }
+  return [...latestBySignature.values()].reverse();
+}
+
+async function recordRegressionCase(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const validationId = String(payload.validation_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const anomalyId = String(payload.anomaly_id || "");
+  const dir = path.join(VALIDATIONS, validationId);
+  if (!validationId || !dir.startsWith(VALIDATIONS) || !fs.existsSync(dir)) return json(res, 404, { error: "unknown validation" });
+  const state = readJsonFile(path.join(dir, "state.json"), {});
+  const anomaly = (state.anomalies || []).find((item) => item.id === anomalyId);
+  if (!anomaly) return json(res, 404, { error: "unknown anomaly" });
+  const item = {
+    at: new Date().toISOString(),
+    case_id: `${validationId}:${anomalyId}`,
+    validation_id: validationId,
+    anomaly_id: anomalyId,
+    signature: anomaly.signature || null,
+    evidence_hash: anomaly.evidence_hash || null,
+    status: "recorded",
+    title: anomaly.title,
+    kind: anomaly.kind,
+    severity: anomaly.severity,
+    note: payload.note || "",
+    anomaly,
+    next_step: "Run a focused regression check to reproduce this scenario and verify whether a later extraction/validation still flags it.",
+  };
+  fs.appendFileSync(REGRESSION_CASES, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: "regression_case_recorded",
+    validation_id: validationId,
+    anomaly_id: anomalyId,
+    signature: item.signature,
+    title: item.title,
+  }) + "\n");
+  json(res, 200, { ok: true, item });
 }
 
 function secondsBetween(a, b) {
@@ -812,6 +882,9 @@ async function api(req, res, url) {
   if (url.pathname === "/api/validation") return json(res, 200, validationPayload());
   if (url.pathname === "/api/validation/start") return startValidation(req, res);
   if (url.pathname === "/api/validation/save") return saveValidationNote(req, res);
+  if (url.pathname === "/api/regression/record") return recordRegressionCase(req, res);
+  if (url.pathname === "/api/regression") return json(res, 200, { updated_at: new Date().toISOString(), cases: regressionCases() });
+  if (url.pathname === "/api/feedback/status") return json(res, 200, feedbackStatus());
   if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
   if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);
   if (url.pathname === "/api/start") return startRun(req, res, url);

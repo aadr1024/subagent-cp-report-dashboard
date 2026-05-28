@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -17,6 +18,8 @@ from sba_report_tool.openai_api import create_response, response_text
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 VALIDATIONS = RUNS / "validations"
+VALIDATION_REVIEW_METADATA = RUNS / "validation-review-metadata.jsonl"
+FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
 MODEL = "gpt-5.2"
 
 
@@ -163,9 +166,17 @@ def anomaly(kind: str, severity: str, title: str, why: str, records: list[dict],
             "row": record.get("row"),
             "station": record.get("station"),
         })
-    seed = "|".join([kind, title, *[str(item.get("id")) for item in records[:8]]])
+    evidence_fingerprint = json.dumps(
+        [(item.get("structure"), item.get("agent"), item.get("source_image"), item.get("value"), item.get("numeric")) for item in evidence],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    signature = hashlib.sha1(f"{kind}|{title}|{evidence_fingerprint}".encode()).hexdigest()
+    seed = "|".join([kind, title, signature[:12]])
     return {
         "id": re.sub(r"[^a-zA-Z0-9_-]+", "-", seed).strip("-")[:140],
+        "signature": signature,
+        "evidence_hash": hashlib.sha1(evidence_fingerprint.encode()).hexdigest(),
         "kind": kind,
         "severity": severity,
         "title": title,
@@ -292,6 +303,7 @@ def llm_review(dataset: dict, preflags: list[dict], log: ValidationLog) -> list[
         },
         "records": compact_records,
         "deterministic_preflags": preflags,
+        "prior_review_decisions": list(prior_review_decisions().values())[-200:],
     }
     log.agent("llm-reviewer", "running", "OpenAI validation reviewer checking extracted dataset", model=MODEL, records=len(compact_records))
     started = time.time()
@@ -339,6 +351,36 @@ def dedupe(anomalies: list[dict]) -> list[dict]:
     return out[:80]
 
 
+def prior_review_decisions() -> dict:
+    decisions = {}
+    if not VALIDATION_REVIEW_METADATA.exists():
+        return decisions
+    for line in VALIDATION_REVIEW_METADATA.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        signature = item.get("signature")
+        if signature:
+            decisions[signature] = item
+    return decisions
+
+
+def suppress_previously_resolved(anomalies: list[dict]) -> tuple[list[dict], list[dict]]:
+    decisions = prior_review_decisions()
+    kept = []
+    suppressed = []
+    for item in anomalies:
+        prior = decisions.get(item.get("signature"))
+        if prior and prior.get("evidence_hash") == item.get("evidence_hash") and prior.get("status") in {"good", "reviewed", "dismissed"}:
+            suppressed.append({**item, "suppressed_by": prior})
+        else:
+            kept.append(item)
+    return kept, suppressed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--validation-id", required=True)
@@ -356,18 +398,34 @@ def main() -> None:
         except Exception as exc:
             llm_flags = []
             log.agent("llm-reviewer", "failed", f"OpenAI validation reviewer failed; keeping deterministic anomaly cards: {exc}")
-        anomalies = dedupe([*preflags, *llm_flags])
+        anomalies, suppressed = suppress_previously_resolved(dedupe([*preflags, *llm_flags]))
+        if suppressed:
+            with FEEDBACK_PROCESSING.open("a") as handle:
+                for item in suppressed:
+                    handle.write(json.dumps({
+                        "at": now(),
+                        "kind": "validation_anomaly_suppressed_from_prior_review",
+                        "validation_id": args.validation_id,
+                        "signature": item.get("signature"),
+                        "evidence_hash": item.get("evidence_hash"),
+                        "prior_status": item.get("suppressed_by", {}).get("status"),
+                        "prior_note": item.get("suppressed_by", {}).get("note"),
+                        "title": item.get("title"),
+                    }) + "\n")
         log.state["anomalies"] = anomalies
+        log.state["suppressed_anomalies"] = suppressed
         log.state["metrics"] = {
             "structures": len(dataset["structures"]),
             "readings": len(dataset["records"]),
             "anomalies": len(anomalies),
+            "suppressed": len(suppressed),
             "high": sum(1 for item in anomalies if item.get("severity") == "high"),
             "medium": sum(1 for item in anomalies if item.get("severity") == "medium"),
             "low": sum(1 for item in anomalies if item.get("severity") == "low"),
             "review_accuracy_proxy_percent": max(0, round(100 - (len(anomalies) / max(1, len(dataset["records"]))) * 100, 1)),
         }
         (run_dir / "anomalies.json").write_text(json.dumps(anomalies, indent=2) + "\n")
+        (run_dir / "suppressed-anomalies.json").write_text(json.dumps(suppressed, indent=2) + "\n")
         log.agent("validation-orchestrator", "complete", f"Validation run complete with {len(anomalies)} anomaly cards")
         log.finish("complete", "Validation run complete")
     except Exception as exc:

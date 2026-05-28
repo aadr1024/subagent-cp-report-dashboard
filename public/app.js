@@ -22,6 +22,9 @@ let activityRuns = [];
 let activityUpdatedAt = null;
 let latestValidation = null;
 let activeFloatingPreview = null;
+let floatingPreviewHideTimer = null;
+let latestFeedbackStatus = null;
+let latestRegressionCases = [];
 
 function loadFeedbackConsole() {
   try {
@@ -798,7 +801,7 @@ function renderValidation(validation) {
   panel.innerHTML = `<div class="validation-summary">
     <div class="stat-card"><span>Structures</span><strong>${metrics.structures ?? "--"}</strong><small>latest extracted runs</small></div>
     <div class="stat-card"><span>Readings</span><strong>${metrics.readings ?? "--"}</strong><small>values reviewed</small></div>
-    <div class="stat-card"><span>Anomalies</span><strong>${rows.length}</strong><small><mark class="bad">${metrics.high || 0} high</mark> <mark class="hot">${metrics.medium || 0} med</mark> <mark>${metrics.low || 0} low</mark></small></div>
+    <div class="stat-card"><span>Anomalies</span><strong>${rows.length}</strong><small><mark class="bad">${metrics.high || 0} high</mark> <mark class="hot">${metrics.medium || 0} med</mark> <mark>${metrics.low || 0} low</mark> <mark class="ok">${metrics.suppressed || 0} accepted</mark></small></div>
     <div class="stat-card"><span>Accuracy proxy</span><strong>${metrics.review_accuracy_proxy_percent ?? "--"}%</strong><small>anomaly-density estimate</small></div>
   </div>
   ${latest.summary ? `<div class="validation-note">${escapeHtml(latest.summary)}</div>` : ""}
@@ -843,7 +846,9 @@ function renderAnomalyCard(validationId, item, contextGroups = []) {
     <div class="anomaly-actions">
       <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(item.saved_note?.note || "")}" />
       <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved" : "Save"}</button>
+      <button class="small-btn good-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Good job</button>
       <button class="small-btn mark-reviewed" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Mark reviewed</button>
+      <button class="small-btn record-regression" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Record error case</button>
       <small class="anomaly-route">Saved here as validation metadata. It does not edit the DOCX; run-board value feedback is stored separately for future agent prompts.</small>
     </div>
   </article>`;
@@ -947,8 +952,100 @@ async function saveAnomaly(button, status = "saved") {
     body: JSON.stringify(payload),
   });
   if (res.ok) {
-    button.textContent = status === "reviewed" ? "Reviewed" : "Saved";
+    button.textContent = status === "reviewed" ? "Reviewed" : status === "good" ? "Looks good" : "Saved";
     pollValidation();
+    pollFeedbackStatus();
+  }
+}
+
+function renderFeedbackLifecycle(status) {
+  latestFeedbackStatus = status;
+  const panel = $("feedbackLifecycle");
+  if (!panel) return;
+  $("feedbackLifecycleUpdated").textContent = `updated ${fmtTime(status.updated_at)}`;
+  const counts = status.counts || {};
+  panel.innerHTML = `<div class="feedback-life-cards">
+    <div class="stat-card"><span>Run feedback</span><strong>${counts.extraction_feedback || 0}</strong><small>feeds future extraction leaf prompts by STR</small></div>
+    <div class="stat-card"><span>Validation reviews</span><strong>${counts.validation_reviews || 0}</strong><small>good/reviewed notes suppress unchanged repeats</small></div>
+    <div class="stat-card"><span>Processed</span><strong>${counts.processed_events || 0}</strong><small>agent/subagent consumption events</small></div>
+  </div>
+  <div class="feedback-life-grid">
+    <div>
+      <div class="mini-title">Recently processed by agents</div>
+      <div class="feedback-life-list">${(status.recent_processed || []).map((item) => `<div class="feedback-life-row">
+        <strong>${escapeHtml(item.kind || "processed")}</strong>
+        <span>${escapeHtml(item.structure ? `STR ${item.structure}` : item.validation_id || "")} ${escapeHtml(item.agent || item.prior_status || "")}</span>
+        <em>${escapeHtml(item.value || item.title || item.prior_note || "")}</em>
+      </div>`).join("") || `<div class="message">No feedback has been consumed by a later run yet.</div>`}</div>
+    </div>
+    <div>
+      <div class="mini-title">Latest validation decisions</div>
+      <div class="feedback-life-list">${(status.recent_validation || []).map((item) => `<div class="feedback-life-row">
+        <strong>${escapeHtml(item.status || "saved")}</strong>
+        <span>${escapeHtml(item.validation_id || "")}</span>
+        <em>${escapeHtml(item.note || item.anomaly_id || "")}</em>
+      </div>`).join("") || `<div class="message">No validation notes yet.</div>`}</div>
+    </div>
+  </div>`;
+}
+
+async function pollFeedbackStatus() {
+  try {
+    const res = await fetch("/api/feedback/status", { cache: "no-store" });
+    if (!res.ok) return;
+    renderFeedbackLifecycle(await res.json());
+  } catch {}
+}
+
+function renderRegressionLedger(payload) {
+  latestRegressionCases = payload.cases || [];
+  const panel = $("regressionLedger");
+  if (!panel) return;
+  $("regressionUpdated").textContent = `${latestRegressionCases.length} recorded case${latestRegressionCases.length === 1 ? "" : "s"} · updated ${fmtTime(payload.updated_at)}`;
+  panel.innerHTML = latestRegressionCases.length
+    ? `<div class="regression-list">${latestRegressionCases.map((item) => `<article class="regression-case ${escapeHtml(item.severity || "")}">
+        <div>
+          <strong>${escapeHtml(item.title || "Recorded anomaly")}</strong>
+          <div class="message">${escapeHtml(item.next_step || "")}</div>
+        </div>
+        <div class="regression-meta">
+          <mark>${escapeHtml(item.status || "recorded")}</mark>
+          <mark>${escapeHtml(item.kind || "anomaly")}</mark>
+          <mark>${escapeHtml(item.severity || "medium")}</mark>
+        </div>
+        <div class="regression-evidence">${(item.anomaly?.evidence || []).slice(0, 6).map((ev) => `<span>STR ${escapeHtml(ev.structure || "?")} · ${escapeHtml(ev.agent || "")} · ${escapeHtml(ev.value ?? "")}</span>`).join("")}</div>
+        <div class="regression-actions">
+          <button class="small-btn" disabled>Focused rerun coming next</button>
+          <small>Case signature: ${escapeHtml(String(item.signature || "").slice(0, 12))}</small>
+        </div>
+      </article>`).join("")}</div>`
+    : `<div class="message">No regression cases recorded yet. Use “Record error case” on an anomaly that should become a durable repeat-check target.</div>`;
+}
+
+async function pollRegressionLedger() {
+  try {
+    const res = await fetch("/api/regression", { cache: "no-store" });
+    if (!res.ok) return;
+    renderRegressionLedger(await res.json());
+  } catch {}
+}
+
+async function recordRegressionCase(button) {
+  const card = button.closest(".anomaly-card");
+  const note = card?.querySelector(".anomaly-note-input")?.value || "";
+  const res = await fetch("/api/regression/record", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      validation_id: button.dataset.validationId,
+      anomaly_id: button.dataset.anomalyId,
+      note,
+    }),
+  });
+  if (res.ok) {
+    button.textContent = "Recorded";
+    pollRegressionLedger();
+    pollFeedbackStatus();
   }
 }
 
@@ -1320,8 +1417,12 @@ document.addEventListener("click", (event) => {
   }
   const save = event.target.closest(".save-anomaly");
   if (save) saveAnomaly(save, "saved");
+  const good = event.target.closest(".good-anomaly");
+  if (good) saveAnomaly(good, "good");
   const reviewed = event.target.closest(".mark-reviewed");
   if (reviewed) saveAnomaly(reviewed, "reviewed");
+  const regression = event.target.closest(".record-regression");
+  if (regression) recordRegressionCase(regression);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
@@ -1410,22 +1511,45 @@ async function hydrateHoverPreview(preview) {
 }
 
 function hideFloatingPreview() {
+  if (floatingPreviewHideTimer) {
+    clearTimeout(floatingPreviewHideTimer);
+    floatingPreviewHideTimer = null;
+  }
   if (!activeFloatingPreview) return;
   activeFloatingPreview.remove();
   activeFloatingPreview = null;
 }
 
-function positionFloatingPreview(preview, anchor) {
-  const rect = anchor.getBoundingClientRect();
-  const width = Math.min(1180, window.innerWidth - 48);
-  preview.style.width = `${width}px`;
-  preview.style.left = `${Math.max(24, Math.min(window.innerWidth - width - 24, rect.left))}px`;
-  const below = rect.bottom + 10;
-  const maxTop = Math.max(72, window.innerHeight - Math.min(620, window.innerHeight - 96));
-  preview.style.top = `${below < window.innerHeight - 260 ? below : maxTop}px`;
+function scheduleFloatingPreviewHide() {
+  if (floatingPreviewHideTimer) clearTimeout(floatingPreviewHideTimer);
+  floatingPreviewHideTimer = setTimeout(hideFloatingPreview, 280);
 }
 
-function showAnomalyFloatingPreview(chip) {
+function cancelFloatingPreviewHide() {
+  if (!floatingPreviewHideTimer) return;
+  clearTimeout(floatingPreviewHideTimer);
+  floatingPreviewHideTimer = null;
+}
+
+function positionFloatingPreview(preview, pointer) {
+  const width = Math.min(1040, window.innerWidth - 36);
+  const height = Math.min(620, window.innerHeight - 72);
+  const margin = 14;
+  const x = Number(pointer?.clientX || window.innerWidth / 2);
+  const y = Number(pointer?.clientY || window.innerHeight / 3);
+  let left = x + margin;
+  if (left + width > window.innerWidth - margin) left = x - width - margin;
+  left = Math.max(margin, Math.min(window.innerWidth - width - margin, left));
+  let top = y + margin;
+  if (top + height > window.innerHeight - margin) top = y - height - margin;
+  top = Math.max(margin, Math.min(window.innerHeight - height - margin, top));
+  preview.style.width = `${width}px`;
+  preview.style.maxHeight = `${height}px`;
+  preview.style.left = `${left}px`;
+  preview.style.top = `${top}px`;
+}
+
+function showAnomalyFloatingPreview(chip, event) {
   const template = chip?.querySelector(".anomaly-preview-template");
   if (!template) return null;
   if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor) return activeFloatingPreview;
@@ -1433,9 +1557,11 @@ function showAnomalyFloatingPreview(chip) {
   if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
   const node = template.content.firstElementChild.cloneNode(true);
   node.dataset.anchorId = chip.dataset.previewAnchor;
+  node.addEventListener("mouseenter", cancelFloatingPreviewHide);
+  node.addEventListener("mouseleave", scheduleFloatingPreviewHide);
   document.body.appendChild(node);
   activeFloatingPreview = node;
-  positionFloatingPreview(node, chip);
+  positionFloatingPreview(node, event);
   hydrateHoverPreview(node);
   return node;
 }
@@ -1443,20 +1569,21 @@ function showAnomalyFloatingPreview(chip) {
 document.addEventListener("mouseover", async (event) => {
   const chip = event.target.closest(".reading-chip");
   const anomalyChip = event.target.closest(".anomaly-chip");
-  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip) : event.target.closest(".hover-preview");
+  if (anomalyChip) cancelFloatingPreviewHide();
+  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip, event) : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
   if (leaf || chip || preview || anomalyChip) deferRenderUntil = Date.now() + 1800;
   hydrateHoverPreview(preview);
 });
 document.addEventListener("mousemove", (event) => {
   const anomalyChip = event.target.closest(".anomaly-chip");
-  if (anomalyChip && activeFloatingPreview) positionFloatingPreview(activeFloatingPreview, anomalyChip);
+  if (anomalyChip && activeFloatingPreview) positionFloatingPreview(activeFloatingPreview, event);
 });
 document.addEventListener("mouseout", (event) => {
   if (!activeFloatingPreview) return;
   const next = event.relatedTarget;
   if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".floating-preview"))) return;
-  hideFloatingPreview();
+  scheduleFloatingPreviewHide();
 });
 window.addEventListener("scroll", hideFloatingPreview, { passive: true });
 window.addEventListener("resize", hideFloatingPreview, { passive: true });
@@ -1465,9 +1592,13 @@ renderFeedbackConsole();
 poll();
 pollActivity();
 pollValidation();
+pollFeedbackStatus();
+pollRegressionLedger();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
+setInterval(pollFeedbackStatus, 3500);
+setInterval(pollRegressionLedger, 3500);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
 }, 500);

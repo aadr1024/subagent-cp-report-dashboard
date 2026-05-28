@@ -26,6 +26,7 @@ SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
 ANNOTATIONS = Path("/Users/aadityarajesh/Downloads/all_scripts/streamlit-image-mt/variations/j260101-article-reports/.j260101-article-reports-annotations.json")
 MODEL = "gpt-5.2"
 GLOBAL_FEEDBACK = RUNS / "global-feedback.jsonl"
+FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
 
 STATUS_ORDER = ["pending", "running", "blocked", "failed", "complete"]
 
@@ -374,6 +375,19 @@ def main() -> None:
         if feedback_items:
             feedback_path = run_dir / "prior-feedback.json"
             feedback_path.write_text(json.dumps(feedback_items[-50:], indent=2) + "\n")
+            with FEEDBACK_PROCESSING.open("a") as handle:
+                for item in feedback_items[-50:]:
+                    handle.write(json.dumps({
+                        "at": now(),
+                        "kind": "extraction_feedback_loaded",
+                        "run_id": run_id,
+                        "structure": args.structure,
+                        "source": "global-feedback.jsonl",
+                        "agent": item.get("agent"),
+                        "field": item.get("field"),
+                        "previous": item.get("previous"),
+                        "value": item.get("value"),
+                    }) + "\n")
             log.artifact("prior human feedback", feedback_path)
             log.agent("human-feedback", "complete", f"Loaded {len(feedback_items)} prior feedback items for this STR", feedback_count=len(feedback_items), feedback=feedback_items[-50:])
             log.step("load_feedback", "complete", f"Loaded {len(feedback_items)} prior feedback items")

@@ -1701,7 +1701,7 @@ main {
 
 .anomaly-actions {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto auto;
   gap: 8px;
 }
 
@@ -1716,6 +1716,84 @@ main {
   grid-column: 1 / -1;
   color: var(--muted);
   font-size: 10px;
+}
+
+.feedback-lifecycle,
+.regression-ledger {
+  padding: 14px;
+}
+
+.feedback-life-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.feedback-life-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.feedback-life-list,
+.regression-list {
+  display: grid;
+  gap: 8px;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.feedback-life-row,
+.regression-case {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--blue);
+  border-radius: 9px;
+  background: #fffdf7;
+  font-size: 12px;
+}
+
+.feedback-life-row span,
+.feedback-life-row em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.regression-case {
+  border-left-color: var(--yellow);
+}
+
+.regression-case.high {
+  border-left-color: var(--red);
+}
+
+.regression-meta,
+.regression-evidence,
+.regression-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.regression-meta mark {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(109, 106, 102, 0.1);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.regression-evidence span,
+.regression-actions small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .launcher-table {
@@ -1829,6 +1907,8 @@ main {
   .agents,
   .stat-cards,
   .validation-summary,
+  .feedback-life-cards,
+  .feedback-life-grid,
   .validation-explain,
   .stats-grid,
   .run-layout {
