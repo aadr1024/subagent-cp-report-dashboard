@@ -1065,6 +1065,8 @@ async function pollFeedbackStatus() {
 
 function renderRegressionLedger(payload) {
   latestRegressionCases = payload.cases || [];
+  const latestRecheck = payload.recheck?.latest || null;
+  const resultByCase = new Map((latestRecheck?.results || []).map((result) => [result.signature || result.case_id, result]));
   const panel = $("regressionLedger");
   if (!panel) return;
   if (scrollablePanelBusy() && panel.innerHTML.trim()) {
@@ -1073,33 +1075,66 @@ function renderRegressionLedger(payload) {
   }
   const scrollSnapshot = dashboardScrollSnapshot();
   $("regressionUpdated").textContent = `${latestRegressionCases.length} recorded case${latestRegressionCases.length === 1 ? "" : "s"} · updated ${fmtTime(payload.updated_at)}`;
-  panel.innerHTML = latestRegressionCases.length
-    ? `<div class="regression-list">${latestRegressionCases.map((item) => `<article class="regression-case ${escapeHtml(item.severity || "")}">
+  const recheckHtml = latestRecheck ? `<div class="regression-recheck">
+    <div>
+      <strong>Focused recheck: ${escapeHtml(latestRecheck.status || "running")}</strong>
+      <span>${Number(latestRecheck.cases_done || 0)} / ${Number(latestRecheck.cases_total || 0)} cases processed</span>
+    </div>
+    <div class="validation-event-log">${(latestRecheck.events || []).slice(-8).reverse().map((event) => `<div class="validation-event ${escapeHtml(event.type || "")}">
+      <span>${fmtTime(event.at)}</span><strong>${escapeHtml(event.type || "event")}</strong><em>${escapeHtml(event.message || "")}</em>
+    </div>`).join("")}</div>
+  </div>` : "";
+  panel.innerHTML = `${recheckHtml}${latestRegressionCases.length
+    ? `<div class="regression-list">${latestRegressionCases.map((item) => {
+        const result = resultByCase.get(item.signature || item.case_id);
+        return `<article class="regression-case ${escapeHtml(item.severity || "")} ${result ? escapeHtml(result.status || "") : ""}">
         <div>
           <strong>${escapeHtml(item.title || "Recorded anomaly")}</strong>
-          <div class="message">${escapeHtml(item.next_step || "")}</div>
+          <div class="message">${escapeHtml(result?.summary || item.next_step || "")}</div>
         </div>
         <div class="regression-meta">
-          <mark>${escapeHtml(item.status || "recorded")}</mark>
+          <mark>${escapeHtml(result ? `recheck: ${result.status}` : item.status || "recorded")}</mark>
           <mark>${escapeHtml(item.kind || "anomaly")}</mark>
           <mark>${escapeHtml(item.severity || "medium")}</mark>
         </div>
         <div class="regression-evidence">${(item.anomaly?.evidence || []).slice(0, 6).map((ev) => `<span>STR ${escapeHtml(ev.structure || "?")} · ${escapeHtml(ev.agent || "")} · ${escapeHtml(ev.value ?? "")}</span>`).join("")}</div>
+        ${result?.readings?.length ? `<div class="regression-results">${result.readings.slice(0, 6).map((reading) => `<span>${escapeHtml(reading.source_image || "")}: ${escapeHtml(reading.old_value || "")} -> ${escapeHtml(reading.rechecked_value || "")} ${escapeHtml(reading.unit || "")}</span>`).join("")}</div>` : ""}
         <div class="regression-actions">
-          <button class="small-btn" disabled>Focused rerun coming next</button>
           <small>Case signature: ${escapeHtml(String(item.signature || "").slice(0, 12))}</small>
         </div>
-      </article>`).join("")}</div>`
-    : `<div class="message">No regression cases recorded yet. Use “Record error case” on an anomaly that should become a durable repeat-check target.</div>`;
+      </article>`;
+      }).join("")}</div>`
+    : `<div class="message">No regression cases recorded yet. Save review notes that describe repeatable errors to create durable repeat-check targets.</div>`}`;
   restoreScrollPositions(scrollSnapshot);
 }
 
 async function pollRegressionLedger() {
   try {
-    const res = await fetch("/api/regression", { cache: "no-store" });
-    if (!res.ok) return;
-    renderRegressionLedger(await res.json());
+    const [casesRes, recheckRes] = await Promise.all([
+      fetch("/api/regression", { cache: "no-store" }),
+      fetch("/api/regression/rechecks", { cache: "no-store" }),
+    ]);
+    if (!casesRes.ok) return;
+    const payload = await casesRes.json();
+    payload.recheck = recheckRes.ok ? await recheckRes.json() : null;
+    renderRegressionLedger(payload);
   } catch {}
+}
+
+async function startRegressionRecheck() {
+  const button = $("startRegressionRecheckBtn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Starting rechecks";
+  }
+  await fetch("/api/regression/recheck/start", { method: "POST" });
+  setTimeout(() => {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Run focused rechecks";
+    }
+  }, 1600);
+  pollRegressionLedger();
 }
 
 async function recordRegressionCase(button) {
@@ -1438,6 +1473,7 @@ function escapeHtml(value) {
 
 $("startBtn").addEventListener("click", startRun);
 $("startValidationBtn")?.addEventListener("click", startValidation);
+$("startRegressionRecheckBtn")?.addEventListener("click", startRegressionRecheck);
 $("structurePickerBtn").addEventListener("click", () => {
   $("structurePicker").hidden = !$("structurePicker").hidden;
 });

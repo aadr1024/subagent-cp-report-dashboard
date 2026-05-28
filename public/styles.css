@@ -1802,8 +1802,28 @@ main {
   border-left-color: var(--red);
 }
 
+.regression-case.fixed {
+  border-left-color: var(--green);
+}
+
+.regression-case.reproduced {
+  border-left-color: var(--red);
+}
+
+.regression-recheck {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid rgba(30, 99, 143, 0.18);
+  border-left: 5px solid var(--blue);
+  border-radius: 10px;
+  background: rgba(30, 99, 143, 0.055);
+}
+
 .regression-meta,
 .regression-evidence,
+.regression-results,
 .regression-actions {
   display: flex;
   gap: 6px;
@@ -1823,9 +1843,17 @@ main {
 }
 
 .regression-evidence span,
+.regression-results span,
 .regression-actions small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.regression-results span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(29, 127, 78, 0.1);
+  color: var(--green);
 }
 
 .launcher-table {

@@ -27,6 +27,8 @@ ANNOTATIONS = Path("/Users/aadityarajesh/Downloads/all_scripts/streamlit-image-m
 MODEL = "gpt-5.2"
 GLOBAL_FEEDBACK = RUNS / "global-feedback.jsonl"
 FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
+VALIDATION_REVIEW_METADATA = RUNS / "validation-review-metadata.jsonl"
+REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 
 STATUS_ORDER = ["pending", "running", "blocked", "failed", "complete"]
 
@@ -124,6 +126,61 @@ class RunLog:
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def read_jsonl(path: Path, limit: int = 80) -> list[dict]:
+    if not path.exists():
+        return []
+    items = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return items[-limit:]
+
+
+def global_validation_feedback_context() -> str:
+    reviews = [
+        {
+            "status": item.get("status"),
+            "note": item.get("note"),
+            "anomaly_id": item.get("anomaly_id"),
+        }
+        for item in read_jsonl(VALIDATION_REVIEW_METADATA, 60)
+        if item.get("note") or item.get("status") in {"reviewed", "good"}
+    ][-30:]
+    cases = [
+        {
+            "title": item.get("title"),
+            "kind": item.get("kind"),
+            "note": item.get("note"),
+            "evidence": [
+                {
+                    "structure": ev.get("structure"),
+                    "agent": ev.get("agent"),
+                    "value": ev.get("value"),
+                    "source_image": ev.get("source_image"),
+                }
+                for ev in (item.get("anomaly", {}).get("evidence") or [])[:6]
+            ],
+        }
+        for item in read_jsonl(REGRESSION_CASES, 40)
+        if item.get("note")
+    ][-20:]
+    domain_rules = [
+        "Table 3 pipe-to-soil potential values are normally negative. Do not drop a visible minus sign because of glare, shadow, LCD segment weakness, or photo angle.",
+        "Table 6 anode open-circuit potentials are normally negative. If the meter appears positive but the context suggests reverse polarity or missing minus, return the negative value and note the sign ambiguity.",
+        "Table 4 current readings are normally milliamps (mA), not amps (A). The leading m can be hidden by lighting; normalize current units to mA unless the display unambiguously says A.",
+        "Table 4 shunt readings are normally millivolts (mV). If units are unclear for shunt readings, prefer mV and explain uncertainty.",
+        "For Table 4 large LCD numbers such as 6369 or 4386, inspect carefully for a decimal point. These are often 63.69 or 43.86 style current readings, not thousands.",
+        "For Table 3 tiny values such as 0.086 where peer values are around 0.8, inspect for a missed digit or decimal position before returning the value.",
+        "Do not invent values. If a correction is based on visual ambiguity and domain convention, include notes/confidence so validation can still surface it.",
+    ]
+    payload = {"domain_rules": domain_rules, "reviewed_feedback": reviews, "regression_cases": cases}
+    return "\nGlobal reviewer feedback and regression lessons for all leaf agents: " + json.dumps(payload, separators=(",", ":"))
 
 
 def site_folders() -> list[Path]:
@@ -394,10 +451,10 @@ def main() -> None:
         else:
             log.agent("human-feedback", "complete", "No prior human feedback for this STR", feedback_count=0, feedback=[])
             log.step("load_feedback", "complete", "No prior feedback")
-        feedback_context = ""
+        feedback_context = global_validation_feedback_context()
         if feedback_items:
             compact = [{"agent": item.get("agent"), "field": item.get("field"), "previous": item.get("previous"), "value": item.get("value")} for item in feedback_items[-20:]]
-            feedback_context = "\nHuman feedback from earlier dashboard review, apply only when relevant to this leaf: " + json.dumps(compact)
+            feedback_context += "\nHuman feedback from earlier dashboard review for this STR, apply only when relevant to this leaf: " + json.dumps(compact)
 
         log.step("target_section", "complete", f"Will fill ordinal {ordinal} block tables {tables['table3']}-{tables['table6']} and heading STR {args.structure}")
 

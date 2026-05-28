@@ -14,12 +14,14 @@ const VALIDATIONS = path.join(RUNS, "validations");
 const VALIDATION_REVIEW_METADATA = path.join(RUNS, "validation-review-metadata.jsonl");
 const FEEDBACK_PROCESSING = path.join(RUNS, "feedback-processing.jsonl");
 const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
+const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 
 fs.mkdirSync(RUNS, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
 fs.mkdirSync(VALIDATIONS, { recursive: true });
+fs.mkdirSync(REGRESSION_RECHECKS, { recursive: true });
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -369,6 +371,54 @@ function regressionCases() {
     latestBySignature.set(item.signature || item.case_id, item);
   }
   return [...latestBySignature.values()].reverse();
+}
+
+function regressionRechecks() {
+  const dirs = fs.readdirSync(REGRESSION_RECHECKS, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(REGRESSION_RECHECKS, entry.name))
+    .sort((a, b) => String(path.basename(b)).localeCompare(String(path.basename(a))));
+  return {
+    latest: dirs[0] ? {
+      ...readJsonFile(path.join(dirs[0], "state.json"), {}),
+      events: readJsonLines(path.join(dirs[0], "events.jsonl")).slice(-120),
+    } : null,
+    rechecks: dirs.map((dir) => {
+      const state = readJsonFile(path.join(dir, "state.json"), {});
+      return {
+        recheck_id: path.basename(dir),
+        status: state.status || "unknown",
+        started_at: state.started_at || null,
+        updated_at: state.updated_at || null,
+        finished_at: state.finished_at || null,
+        cases_total: state.cases_total || 0,
+        cases_done: state.cases_done || 0,
+      };
+    }),
+  };
+}
+
+function startRegressionRecheck(req, res) {
+  const python = process.env.PYTHON || "python3";
+  const recheckId = `${stamp()}-regression-recheck`;
+  const dir = path.join(REGRESSION_RECHECKS, recheckId);
+  fs.mkdirSync(dir, { recursive: true });
+  const env = { ...process.env };
+  env.PYTHONPATH = SBA_SRC + (env.PYTHONPATH ? `:${env.PYTHONPATH}` : "");
+  const child = spawn(python, [path.join(ROOT, "regression_recheck.py"), "--recheck-id", recheckId], {
+    cwd: ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const log = path.join(REGRESSION_RECHECKS, "recheck-spawn.log");
+  fs.appendFileSync(log, `\n[start] pid=${child.pid} recheck=${recheckId} at=${new Date().toISOString()}\n`);
+  child.stdout.on("data", (chunk) => fs.appendFileSync(log, chunk));
+  child.stderr.on("data", (chunk) => fs.appendFileSync(log, chunk));
+  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, recheck_id: recheckId, started_at: new Date().toISOString() }, null, 2) + "\n");
+  child.on("exit", (code, signal) => {
+    fs.appendFileSync(log, `[exit] pid=${child.pid} code=${code} signal=${signal}\n`);
+  });
+  json(res, 202, { ok: true, recheck_id: recheckId, pid: child.pid });
 }
 
 function noteLooksLikeErrorCase(note) {
@@ -899,6 +949,8 @@ async function api(req, res, url) {
   if (url.pathname === "/api/validation/save") return saveValidationNote(req, res);
   if (url.pathname === "/api/regression/record") return recordRegressionCase(req, res);
   if (url.pathname === "/api/regression") return json(res, 200, { updated_at: new Date().toISOString(), cases: regressionCases() });
+  if (url.pathname === "/api/regression/rechecks") return json(res, 200, { updated_at: new Date().toISOString(), ...regressionRechecks() });
+  if (url.pathname === "/api/regression/recheck/start") return startRegressionRecheck(req, res);
   if (url.pathname === "/api/feedback/status") return json(res, 200, feedbackStatus());
   if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
   if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);
