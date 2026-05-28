@@ -1022,7 +1022,7 @@ main {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
   padding-top: 8px;
   margin-top: 8px;
   border-top: 1px solid var(--line);

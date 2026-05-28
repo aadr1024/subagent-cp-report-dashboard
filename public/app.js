@@ -1501,7 +1501,7 @@ async function hydrateHoverPreview(preview) {
       const current = strip.querySelector(".neighbor.current");
       if (current) {
         const left = current.offsetLeft - (strip.clientWidth - current.clientWidth) / 2;
-        strip.scrollTo({ left: Math.max(0, left), behavior: "instant" });
+        strip.scrollLeft = Math.max(0, left);
       }
     });
   } catch {}
