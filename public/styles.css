@@ -1453,6 +1453,83 @@ main {
   font-size: 12px;
 }
 
+.validation-live {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(201, 133, 17, 0.22);
+  border-left: 6px solid var(--yellow);
+  border-radius: 12px;
+  background: rgba(201, 133, 17, 0.055);
+}
+
+.validation-live-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.validation-live-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.validation-explain {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.validation-explain div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(217, 209, 194, 0.8);
+  border-radius: 9px;
+  background: rgba(255, 253, 247, 0.74);
+  font-size: 11px;
+}
+
+.validation-explain span {
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.validation-event-log {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.validation-event {
+  display: grid;
+  grid-template-columns: 58px 70px 1fr;
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid rgba(217, 209, 194, 0.8);
+  border-left: 4px solid var(--blue);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.82);
+  font-size: 11px;
+}
+
+.validation-event.agent {
+  border-left-color: var(--green);
+}
+
+.validation-event.finish {
+  border-left-color: var(--yellow);
+}
+
+.validation-event span,
+.validation-event em {
+  color: var(--muted);
+  font-style: normal;
+}
+
 .validation-agents {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1732,6 +1809,7 @@ main {
   .agents,
   .stat-cards,
   .validation-summary,
+  .validation-explain,
   .stats-grid,
   .run-layout {
     grid-template-columns: 1fr;

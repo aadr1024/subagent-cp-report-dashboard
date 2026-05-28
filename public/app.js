@@ -791,6 +791,9 @@ function renderValidation(validation) {
     return;
   }
   const metrics = latest.metrics || {};
+  const events = latest.events || [];
+  const activeAgent = Object.values(latest.agents || {}).find((agent) => agent.status === "running");
+  const latestEvent = events.at(-1);
   panel.innerHTML = `<div class="validation-summary">
     <div class="stat-card"><span>Structures</span><strong>${metrics.structures ?? "--"}</strong><small>latest extracted runs</small></div>
     <div class="stat-card"><span>Readings</span><strong>${metrics.readings ?? "--"}</strong><small>values reviewed</small></div>
@@ -798,6 +801,23 @@ function renderValidation(validation) {
     <div class="stat-card"><span>Accuracy proxy</span><strong>${metrics.review_accuracy_proxy_percent ?? "--"}%</strong><small>anomaly-density estimate</small></div>
   </div>
   ${latest.summary ? `<div class="validation-note">${escapeHtml(latest.summary)}</div>` : ""}
+  <div class="validation-live">
+    <div class="validation-live-head">
+      <strong>${escapeHtml(activeAgent ? `Active: ${activeAgent.name}` : `Validation ${latest.status || "unknown"}`)}</strong>
+      <span>${escapeHtml(activeAgent?.message || latestEvent?.message || "Waiting for validation movement")}</span>
+    </div>
+    <div class="validation-explain">
+      <div><strong>shape-validator</strong><span>checks missing/extra table values, especially Table 3 rows that should usually have five readings.</span></div>
+      <div><strong>range-sign-validator</strong><span>checks sign flips and magnitude outliers against same-table peers across STRs.</span></div>
+      <div><strong>station-pair-validator</strong><span>checks whether Table 5 current readings and Table 6 potential readings have matching station/anode coverage.</span></div>
+      <div><strong>llm-reviewer</strong><span>asks OpenAI to review the extracted dataset as a whole and explain suspicious patterns.</span></div>
+    </div>
+    <div class="validation-event-log">${events.slice(-18).reverse().map((event) => `<div class="validation-event ${escapeHtml(event.type || "")}">
+      <span>${fmtTime(event.at)}</span>
+      <strong>${escapeHtml(event.type || "event")}</strong>
+      <em>${escapeHtml(event.message || "")}</em>
+    </div>`).join("") || `<div class="message">Validation events will appear here live.</div>`}</div>
+  </div>
   <div class="validation-agents">${Object.values(latest.agents || {}).map((agent) => `<div class="validation-agent ${cls(agent.status)}">
     ${statusDot(agent.status)}<strong>${escapeHtml(agent.name || "")}</strong><span>${escapeHtml(agent.message || "")}</span>
   </div>`).join("")}</div>

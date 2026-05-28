@@ -207,11 +207,13 @@ function validationDirs() {
 function validationState(dir) {
   const state = readJsonFile(path.join(dir, "state.json"), {});
   const notes = readJsonLines(path.join(dir, "notes.jsonl"));
+  const events = readJsonLines(path.join(dir, "events.jsonl"));
   const noteMap = notes.reduce((map, note) => {
     if (note.anomaly_id) map[note.anomaly_id] = note;
     return map;
   }, {});
   state.notes = notes;
+  state.events = events.slice(-160);
   state.anomalies = (state.anomalies || []).map((item) => ({ ...item, saved_note: noteMap[item.id] || null }));
   return state;
 }
