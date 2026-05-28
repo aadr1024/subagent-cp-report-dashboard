@@ -1535,7 +1535,7 @@ function hideFloatingPreview() {
 
 function scheduleFloatingPreviewHide() {
   if (floatingPreviewHideTimer) clearTimeout(floatingPreviewHideTimer);
-  floatingPreviewHideTimer = setTimeout(hideFloatingPreview, 280);
+  floatingPreviewHideTimer = setTimeout(hideFloatingPreview, 650);
 }
 
 function cancelFloatingPreviewHide() {
@@ -1620,7 +1620,6 @@ document.addEventListener("mouseout", (event) => {
   if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".floating-preview"))) return;
   scheduleFloatingPreviewHide();
 });
-window.addEventListener("scroll", hideFloatingPreview, { passive: true });
 window.addEventListener("resize", hideFloatingPreview, { passive: true });
 loadStructures();
 renderFeedbackConsole();
