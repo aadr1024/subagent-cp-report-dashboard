@@ -36,6 +36,7 @@ const softwareValidationDrafts = new Map();
 const docxReviewDrafts = new Map();
 let docxReviewFilter = "";
 let activeDocxCellKey = "";
+let lastDocxReviewRenderKey = "";
 let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
@@ -1265,25 +1266,54 @@ function renderDocxStructure(item, index) {
   </details>`;
 }
 
+function docxReviewRenderKey(payload) {
+  const structures = payload?.structures || [];
+  return JSON.stringify({
+    active_docx_mtime: payload?.active_docx_mtime || "",
+    summary: payload?.summary || {},
+    filter: docxReviewFilter || "",
+    structures: structures.map((item) => ({
+      structure: item.structure,
+      status: item.status,
+      run_id: item.run_id,
+      run_version_label: item.run_version_label,
+      patch_error: item.patch_error || "",
+      summary: item.summary || {},
+      slots: (item.slots || []).map((slot) => ({
+        k: slot.feedback_key || slot.lock_key || `${slot.table_key}:${slot.label}:${slot.row_index}:${slot.col_index}`,
+        a: slot.actual || "",
+        e: slot.expected || "",
+        s: slot.status || "",
+        l: Boolean(slot.locked),
+        lv: slot.locked_value || "",
+        f: (slot.feedback || []).length,
+      })),
+    })),
+  });
+}
+
 function renderDocxReview(payload) {
   latestDocxReview = payload;
   const panel = $("docxReviewPanel");
   if (!panel) return;
-  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
-    pendingDocxReviewRender = payload;
-    return;
-  }
   const status = $("docxReviewStatus");
-  const scrollSnapshot = dashboardScrollSnapshot();
   if (!payload || payload.status === "failed") {
     if (status) status.textContent = "DOCX review failed";
+    if (panel.innerHTML.trim()) return;
     panel.innerHTML = `<div class="message">DOCX review unavailable: ${escapeHtml(payload?.error || "no payload")}</div>`;
-    restoreScrollPositions(scrollSnapshot);
     return;
   }
   const summary = payload.summary || {};
   const structures = payload.structures || [];
   if (status) status.textContent = `${docxReviewLine(summary)} · ${Number(payload.structure_count || structures.length)} STRs`;
+  const renderKey = docxReviewRenderKey(payload);
+  if (panel.innerHTML.trim() && renderKey === lastDocxReviewRenderKey) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingDocxReviewRender = payload;
+    return;
+  }
+  lastDocxReviewRenderKey = renderKey;
+  const scrollSnapshot = dashboardScrollSnapshot();
   panel.innerHTML = `<div class="docx-review-summary">
     <div class="stat-card"><span>Single source</span><strong>${escapeHtml(payload.active_docx_exists ? "active DOCX" : "missing")}</strong><small>${escapeHtml(payload.active_docx_mtime || "no mtime")}</small></div>
     <div class="stat-card"><span>Cells</span><strong>${Number(summary.filled || 0)}/${Number(summary.total || 0)}</strong><small>actual DOCX filled</small></div>
