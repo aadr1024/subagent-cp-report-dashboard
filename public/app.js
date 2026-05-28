@@ -30,6 +30,7 @@ let latestFeedbackStatus = null;
 let latestRegressionCases = [];
 let anomalyFloatingPreview = null;
 const anomalyNoteDrafts = new Map();
+let validationEditLockUntil = 0;
 
 function loadFeedbackConsole() {
   try {
@@ -604,7 +605,7 @@ function dashboardScrollSnapshot() {
 }
 
 function scrollablePanelBusy() {
-  return Date.now() < scrollablePanelQuietUntil || editingDashboardPanel();
+  return Date.now() < scrollablePanelQuietUntil || Date.now() < validationEditLockUntil || anomalyNoteDrafts.size > 0 || editingDashboardPanel();
 }
 
 function editingDashboardPanel() {
@@ -612,6 +613,18 @@ function editingDashboardPanel() {
   if (!active) return false;
   if (!active.closest?.("#validationPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
   return active.matches("input, textarea, select, [contenteditable='true']");
+}
+
+function lockValidationEditing(ms = 30_000) {
+  validationEditLockUntil = Math.max(validationEditLockUntil, Date.now() + ms);
+  scrollablePanelQuietUntil = Math.max(scrollablePanelQuietUntil, Date.now() + ms);
+}
+
+function rememberAnomalyDraft(input) {
+  const card = input?.closest?.(".anomaly-card");
+  if (!card?.dataset.anomalyId) return;
+  if (input.value) anomalyNoteDrafts.set(card.dataset.anomalyId, input.value);
+  else anomalyNoteDrafts.delete(card.dataset.anomalyId);
 }
 
 function markScrollablePanelBusy(event) {
@@ -986,6 +999,7 @@ async function saveAnomaly(button, status = "saved") {
   });
   if (res.ok) {
     anomalyNoteDrafts.delete(payload.anomaly_id);
+    validationEditLockUntil = Date.now() + 1000;
     const effectiveStatus = payload.status;
     const label = effectiveStatus === "reviewed" ? "reviewed" : effectiveStatus === "good" ? "looks good" : "saved";
     button.textContent = effectiveStatus === "reviewed" ? "Saved review" : effectiveStatus === "good" ? "Looks good" : "Saved";
@@ -1483,12 +1497,32 @@ document.addEventListener("click", (event) => {
 document.addEventListener("input", (event) => {
   const input = event.target.closest(".anomaly-note-input");
   if (!input) return;
-  const card = input.closest(".anomaly-card");
-  if (!card?.dataset.anomalyId) return;
-  anomalyNoteDrafts.set(card.dataset.anomalyId, input.value);
-  scrollablePanelQuietUntil = Date.now() + 5000;
+  rememberAnomalyDraft(input);
+  lockValidationEditing();
 });
+document.addEventListener("focusin", (event) => {
+  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
+});
+document.addEventListener("focusout", (event) => {
+  const input = event.target.closest?.(".anomaly-note-input");
+  if (!input) return;
+  rememberAnomalyDraft(input);
+  validationEditLockUntil = Math.max(validationEditLockUntil, Date.now() + 5000);
+});
+document.addEventListener("paste", (event) => {
+  const input = event.target.closest?.(".anomaly-note-input");
+  if (!input) return;
+  lockValidationEditing();
+  setTimeout(() => {
+    rememberAnomalyDraft(input);
+    lockValidationEditing();
+  }, 0);
+}, true);
+document.addEventListener("beforeinput", (event) => {
+  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
+}, true);
 document.addEventListener("keydown", (event) => {
+  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
   const quick = event.target.closest(".quick-feedback textarea");
   if (quick) {
     if (event.key === "Escape") {
