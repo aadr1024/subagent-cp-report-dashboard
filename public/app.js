@@ -17,6 +17,9 @@ let scrollablePanelQuietUntil = 0;
 let pendingRailRender = false;
 let pendingLauncherRender = false;
 let pendingStatsRender = null;
+let pendingValidationRender = null;
+let pendingFeedbackRender = null;
+let pendingRegressionRender = null;
 let activityEvents = [];
 let activityRuns = [];
 let activityUpdatedAt = null;
@@ -567,6 +570,7 @@ function captureScrollPositions(selector) {
   return [...document.querySelectorAll(selector)].map((node, index) => ({
     selector,
     index,
+    key: node.id || node.dataset.scrollKey || node.getAttribute("aria-label") || "",
     top: node.scrollTop,
     left: node.scrollLeft,
   }));
@@ -584,12 +588,26 @@ function restoreScrollPositions(snapshot) {
   });
 }
 
+function dashboardScrollSnapshot() {
+  return [
+    ...captureScrollPositions("#foldRail .rail-list"),
+    ...captureScrollPositions("#reportLauncher"),
+    ...captureScrollPositions("#statsPanel .health-list"),
+    ...captureScrollPositions("#validationPanel .validation-list"),
+    ...captureScrollPositions("#validationPanel .validation-event-log"),
+    ...captureScrollPositions("#feedbackLifecycle .feedback-life-list"),
+    ...captureScrollPositions("#regressionLedger .regression-list"),
+    ...captureScrollPositions("#events"),
+    ...captureScrollPositions("#artifacts"),
+  ];
+}
+
 function scrollablePanelBusy() {
   return Date.now() < scrollablePanelQuietUntil;
 }
 
 function markScrollablePanelBusy(event) {
-  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list")) return;
+  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #regressionLedger .regression-list, #events, #artifacts")) return;
   scrollablePanelQuietUntil = Date.now() + 700;
 }
 
@@ -788,11 +806,17 @@ function renderValidation(validation) {
   latestValidation = validation;
   const panel = $("validationPanel");
   if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingValidationRender = validation;
+    return;
+  }
+  const scrollSnapshot = dashboardScrollSnapshot();
   const latest = validation?.latest || null;
   const rows = latest?.anomalies || [];
   $("validationStatus").textContent = latest ? `${latest.status || "unknown"} · ${rows.length} anomalies` : "not started";
   if (!latest) {
     panel.innerHTML = `<div class="message">Run validation agent to scan extracted values for missing counts, sign/magnitude outliers, station pairing issues, and other review-worthy abnormalities.</div>`;
+    restoreScrollPositions(scrollSnapshot);
     return;
   }
   const metrics = latest.metrics || {};
@@ -827,6 +851,7 @@ function renderValidation(validation) {
     ${statusDot(agent.status)}<strong>${escapeHtml(agent.name || "")}</strong><span>${escapeHtml(agent.message || "")}</span>
   </div>`).join("")}</div>
   <div class="validation-list">${rows.length ? rows.map((item) => renderAnomalyCard(latest.validation_id, item, latest.context_groups || [])).join("") : `<div class="message">No anomaly cards yet. If the validation is running, cards will appear when the reviewer finishes.</div>`}</div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 function renderAnomalyCard(validationId, item, contextGroups = []) {
@@ -974,6 +999,11 @@ function renderFeedbackLifecycle(status) {
   latestFeedbackStatus = status;
   const panel = $("feedbackLifecycle");
   if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingFeedbackRender = status;
+    return;
+  }
+  const scrollSnapshot = dashboardScrollSnapshot();
   $("feedbackLifecycleUpdated").textContent = `updated ${fmtTime(status.updated_at)}`;
   const counts = status.counts || {};
   panel.innerHTML = `<div class="feedback-life-cards">
@@ -999,6 +1029,7 @@ function renderFeedbackLifecycle(status) {
       </div>`).join("") || `<div class="message">No validation notes yet.</div>`}</div>
     </div>
   </div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 async function pollFeedbackStatus() {
@@ -1013,6 +1044,11 @@ function renderRegressionLedger(payload) {
   latestRegressionCases = payload.cases || [];
   const panel = $("regressionLedger");
   if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingRegressionRender = payload;
+    return;
+  }
+  const scrollSnapshot = dashboardScrollSnapshot();
   $("regressionUpdated").textContent = `${latestRegressionCases.length} recorded case${latestRegressionCases.length === 1 ? "" : "s"} · updated ${fmtTime(payload.updated_at)}`;
   panel.innerHTML = latestRegressionCases.length
     ? `<div class="regression-list">${latestRegressionCases.map((item) => `<article class="regression-case ${escapeHtml(item.severity || "")}">
@@ -1032,6 +1068,7 @@ function renderRegressionLedger(payload) {
         </div>
       </article>`).join("")}</div>`
     : `<div class="message">No regression cases recorded yet. Use “Record error case” on an anomaly that should become a durable repeat-check target.</div>`;
+  restoreScrollPositions(scrollSnapshot);
 }
 
 async function pollRegressionLedger() {
@@ -1650,6 +1687,21 @@ setInterval(() => {
     const stats = pendingStatsRender;
     pendingStatsRender = null;
     renderStats(stats);
+  }
+  if (pendingValidationRender) {
+    const validation = pendingValidationRender;
+    pendingValidationRender = null;
+    renderValidation(validation);
+  }
+  if (pendingFeedbackRender) {
+    const feedback = pendingFeedbackRender;
+    pendingFeedbackRender = null;
+    renderFeedbackLifecycle(feedback);
+  }
+  if (pendingRegressionRender) {
+    const regression = pendingRegressionRender;
+    pendingRegressionRender = null;
+    renderRegressionLedger(regression);
   }
 }, 250);
 ["scroll", "pointerdown", "wheel", "keydown"].forEach((eventName) => {
