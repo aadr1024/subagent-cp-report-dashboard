@@ -1,0 +1,8 @@
+{
+  "project": "J260101 CP Installation Report CETO 962L-986L",
+  "original_docx": "/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L .docx",
+  "working_final_docx": "/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L__subagent-dashboard-FINAL.docx",
+  "active_output_role": "working_final_docx",
+  "never_write_original": true,
+  "rule": "All dashboard writers and open actions must resolve the active report from this manifest. The original DOCX is read-only seed input."
+}

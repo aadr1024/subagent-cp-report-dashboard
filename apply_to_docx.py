@@ -17,9 +17,22 @@ from lxml import etree
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 CURRENT = RUNS / "current-run.txt"
-ORIGINAL = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L .docx")
-REPORT_DIR = ORIGINAL.parent
-SHARED_OUTPUT = REPORT_DIR / "CP Installation Report___CETO 962L-986L__subagent-dashboard-FINAL.docx"
+SOURCE_OF_TRUTH = ROOT / "report-source-of-truth.json"
+
+
+def load_report_source_of_truth() -> dict:
+    data = json.loads(SOURCE_OF_TRUTH.read_text())
+    original = Path(data["original_docx"]).expanduser().resolve()
+    active = Path(data[data.get("active_output_role", "working_final_docx")]).expanduser().resolve()
+    if data.get("never_write_original", True) and active == original:
+        raise RuntimeError("Report source-of-truth misconfigured: active output equals original DOCX.")
+    return {**data, "original_docx": str(original), "active_docx": str(active)}
+
+
+REPORT_SOURCE_OF_TRUTH = load_report_source_of_truth()
+ORIGINAL = Path(REPORT_SOURCE_OF_TRUTH["original_docx"])
+SHARED_OUTPUT = Path(REPORT_SOURCE_OF_TRUTH["active_docx"])
+REPORT_DIR = SHARED_OUTPUT.parent
 FINAL_LOCK = RUNS / "final-docx.lock"
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
@@ -292,7 +305,13 @@ def valid_docx(path: Path) -> bool:
 def write_docx(run_dir: Path, state: State, patch: dict, shared: bool = True) -> Path:
     structure = state.state["structure"]
     out = SHARED_OUTPUT if shared else REPORT_DIR / f"CP Installation Report___CETO 962L-986L__subagent-dashboard-STR{structure}.docx"
+    if out.resolve() == ORIGINAL.resolve():
+        raise RuntimeError("Refusing to write original DOCX. Check report-source-of-truth.json.")
+    if shared and out.resolve() != SHARED_OUTPUT.resolve():
+        raise RuntimeError("Shared DOCX output drifted away from report-source-of-truth.json.")
     source = out if shared and out.exists() and valid_docx(out) else ORIGINAL
+    if source.resolve() not in {ORIGINAL.resolve(), SHARED_OUTPUT.resolve()}:
+        raise RuntimeError("Unexpected DOCX source path. Check report-source-of-truth.json.")
     parser = etree.XMLParser(remove_blank_text=False, resolve_entities=False)
     with zipfile.ZipFile(source) as zin:
         infos = zin.infolist()
@@ -361,6 +380,7 @@ def main() -> None:
             "running",
             "Parent writer translating leaf outputs into table-cell patch and shared final DOCX",
             prompt_summary="Build source-backed cell writes, acquire shared DOCX lock, update heading/tables, read back target tables, and package-check the copied report.",
+            report_source_of_truth=REPORT_SOURCE_OF_TRUTH,
         )
         state.step("apply_docx", "running", "Building source-backed table-cell patch")
         state.step("build_patch", "running", "Translating leaf outputs into DOCX coordinates")
@@ -381,6 +401,7 @@ def main() -> None:
             if not args.single_output:
                 fcntl.flock(lock, fcntl.LOCK_UN)
         state.state["output_docx"] = str(out)
+        state.state["report_source_of_truth"] = REPORT_SOURCE_OF_TRUTH
         state.step("write_docx", "complete", f"Wrote report copy: {out.name}", output_docx=str(out))
 
         state.step("readback", "running", "Reading STR table block from written DOCX")

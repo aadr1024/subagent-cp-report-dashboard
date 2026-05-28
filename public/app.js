@@ -32,6 +32,8 @@ let latestFeedbackStatus = null;
 let latestRegressionCases = [];
 let latestRegressionSolutions = [];
 let latestSolutionReplay = null;
+let optimisticCaseReplay = null;
+let reportSourceTruth = null;
 let anomalyFloatingPreview = null;
 const anomalyNoteDrafts = new Map();
 let validationEditLockUntil = 0;
@@ -1282,11 +1284,16 @@ function renderSolutionProof(solution) {
   const logicTree = renderLogicTreeTooltip(logicTreeForSolutionReading(solution, item, reading, evidence), logic);
   const oldValue = reading.old_value ?? evidence?.value ?? "";
   const newValue = reading.rechecked_value ?? "";
+  const caseKey = item.signature || item.case_id || "";
   return `<div class="solution-proof">
     <div class="proof-head">
-      <strong>Trace one replay case</strong>
-      <span>follow the value through the agent nodes</span>
+      <div>
+        <strong>Trace one replay case</strong>
+        <span>click play, then watch the agent tree move live</span>
+      </div>
+      <button class="small-btn play-proof-case" data-solution-id="${escapeHtml(solution.solution_id || "")}" data-case-key="${escapeHtml(caseKey)}">Play this trace</button>
     </div>
+    ${renderProofLiveReplay(item)}
     <div class="proof-grid">
       <figure class="proof-image">
         ${thumb ? `<img src="${escapeHtml(thumb)}" alt="${escapeHtml(reading.source_image || evidence?.source_image || "evidence")}" loading="lazy" decoding="async" fetchpriority="low" />` : `<div class="proof-image-missing">image unavailable</div>`}
@@ -1295,25 +1302,25 @@ function renderSolutionProof(solution) {
       <div class="proof-trace">
         <div class="trace-case-title">${escapeHtml(item.title || "")}</div>
         <div class="trace-row">
-          <div class="trace-step old logic-chip">
+          <div class="trace-step old logic-chip ${escapeHtml(replayNodeStatus(item, "detector-agent").status)}">
             <span>old leaf output</span>
             <strong>${escapeHtml(oldValue)}</strong>
             ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step inspect logic-chip">
+          <div class="trace-step inspect logic-chip ${escapeHtml(replayNodeStatus(item, "evidence-leaf").status)}">
             <span>evidence leaf checks</span>
             <strong>${escapeHtml(reading.source_image || evidence?.source_image || "source")}</strong>
             ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step rule logic-chip">
+          <div class="trace-step rule logic-chip ${escapeHtml(replayNodeStatus(item, "rule-gate").status)}">
             <span>rule gate decides</span>
             <strong>${escapeHtml(solution.title || "rule")}</strong>
             ${logicTree}
           </div>
           <i></i>
-          <div class="trace-step corrected logic-chip">
+          <div class="trace-step corrected logic-chip ${escapeHtml(replayNodeStatus(item, "replay-verifier").status)}">
             <span>replay result</span>
             <strong>${escapeHtml(newValue)} ${escapeHtml(reading.unit || "")}</strong>
             ${logicTree}
@@ -1330,12 +1337,28 @@ function renderSolutionProof(solution) {
 }
 
 function caseReplayFor(item) {
+  const keys = [item?.case_id, item?.signature].map(String);
+  if (optimisticCaseReplay && keys.includes(String(optimisticCaseReplay.case_key))) return optimisticCaseReplay;
   const replay = latestSolutionReplay;
   if (!replay) return null;
   const key = replay.case_key || replay.active_signature || replay.active_case_id || "";
-  const matches = key && [item.case_id, item.signature].map(String).includes(String(key));
+  const matches = key && keys.includes(String(key));
   if (!matches) return null;
+  if (optimisticCaseReplay && String(optimisticCaseReplay.case_key) === String(key) && replay.status !== "running") optimisticCaseReplay = null;
   return replay;
+}
+
+function replayNodeStatus(item, node) {
+  const replay = caseReplayFor(item);
+  if (!replay) return { status: "", message: "" };
+  const keys = [item?.case_id, item?.signature].map(String);
+  const events = (replay.node_events || []).filter((event) => keys.includes(String(event.case_id)) || keys.includes(String(event.signature)));
+  const event = events.filter((entry) => entry.node === node).at(-1);
+  const activeNode = replay.status === "running" ? (replay.active_node || events.at(-1)?.node || "") : "";
+  return {
+    status: event?.status || event?.node_status || (node === activeNode ? "running" : "pending"),
+    message: event?.message || (node === activeNode ? "active now" : ""),
+  };
 }
 
 function renderLiveCaseReplay(item) {
@@ -1367,6 +1390,48 @@ function renderLiveCaseReplay(item) {
   </div>`;
 }
 
+function renderProofLiveReplay(item) {
+  const replay = caseReplayFor(item);
+  const nodes = [
+    ["detector-agent", "Detector"],
+    ["evidence-leaf", "Evidence"],
+    ["rule-gate", "Rule"],
+    ["focused-openai-leaf", "OpenAI leaf"],
+    ["replay-verifier", "Verifier"],
+    ["prompt-memory", "Memory"],
+  ];
+  const keys = [item?.case_id, item?.signature].map(String);
+  const events = replay
+    ? (replay.node_events || []).filter((event) => keys.includes(String(event.case_id)) || keys.includes(String(event.signature)))
+    : [];
+  const latestEvent = events.at(-1);
+  const activeNode = replay?.status === "running" ? (replay.active_node || latestEvent?.node || "") : "";
+  const headline = replay
+    ? replay.status === "running"
+      ? `${String(activeNode || "starting").replaceAll("-", " ")} is happening now`
+      : `Replay ended: ${replay.status || "complete"}`
+    : "Press play to run this one case live";
+  return `<div class="proof-live ${escapeHtml(replay?.status || "idle")}">
+    <div class="proof-live-head">
+      <strong>${escapeHtml(headline)}</strong>
+      <span>${escapeHtml(replay?.recheck_id || "ready")}</span>
+    </div>
+    <div class="proof-live-nodes">${nodes.map(([node, label], index) => {
+      const state = replayNodeStatus(item, node);
+      const isActive = node === activeNode;
+      return `<div class="proof-live-node ${escapeHtml(state.status || "pending")} ${isActive ? "active" : ""}">
+        <b>${index + 1}</b>
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(isActive ? "happening now" : state.message || state.status || "waiting")}</span>
+      </div>`;
+    }).join("")}</div>
+    <div class="proof-live-current">
+      <strong>${escapeHtml(latestEvent ? String(latestEvent.node || "").replaceAll("-", " ") : "waiting")}</strong>
+      <span>${escapeHtml(latestEvent?.message || "No live replay has started for this case yet.")}</span>
+    </div>
+  </div>`;
+}
+
 function renderSolutionCase(item, solution) {
   const result = item.result || null;
   const readings = result?.readings || [];
@@ -1379,11 +1444,6 @@ function renderSolutionCase(item, solution) {
     <mark>${escapeHtml(item.outcome || "not-run")}</mark>
     ${result?.summary ? `<em>${escapeHtml(result.summary)}</em>` : `<em>${escapeHtml(item.note || "Recorded case waiting for replay.")}</em>`}
     ${readings.length ? `<div class="solution-readings">${readings.slice(0, 6).map((reading) => `<span>${escapeHtml(reading.source_image || "")}: ${escapeHtml(reading.old_value || "")} -> ${escapeHtml(reading.rechecked_value || "")} ${escapeHtml(reading.unit || "")}</span>`).join("")}</div>` : ""}
-    <div class="solution-case-actions">
-      <button class="small-btn play-case" data-solution-id="${escapeHtml(solution?.solution_id || "")}" data-case-key="${escapeHtml(item.signature || item.case_id || "")}">Play this case</button>
-      <small>Runs only this recorded error case and streams the agent nodes here.</small>
-    </div>
-    ${renderLiveCaseReplay(item)}
   </div>`;
 }
 
@@ -1478,7 +1538,7 @@ async function pollRegressionLedger() {
 
 async function startRegressionRecheck(solutionId = "", caseKey = "") {
   const button = caseKey
-    ? document.querySelector(`.play-case[data-case-key="${CSS.escape(caseKey)}"]`)
+    ? document.querySelector(`.play-proof-case[data-case-key="${CSS.escape(caseKey)}"], .play-case[data-case-key="${CSS.escape(caseKey)}"]`)
     : solutionId ? document.querySelector(`.replay-solution[data-solution-id="${CSS.escape(solutionId)}"]`) : $("startRegressionRecheckBtn");
   if (button) {
     button.disabled = true;
@@ -1488,6 +1548,23 @@ async function startRegressionRecheck(solutionId = "", caseKey = "") {
   if (solutionId) params.set("solution", solutionId);
   if (caseKey) params.set("case", caseKey);
   const suffix = params.toString() ? `?${params}` : "";
+  if (caseKey) {
+    optimisticCaseReplay = {
+      status: "running",
+      recheck_id: "starting",
+      case_key: caseKey,
+      active_node: "detector-agent",
+      node_events: [{
+        at: new Date().toISOString(),
+        case_id: caseKey,
+        signature: caseKey,
+        node: "detector-agent",
+        status: "running",
+        message: "Detector agent is starting this single-case replay.",
+      }],
+    };
+    pollRegressionSolutions();
+  }
   await fetch(`/api/regression/recheck/start${suffix}`, { method: "POST" });
   setTimeout(() => {
     if (button) {
@@ -1684,6 +1761,20 @@ async function loadStructures() {
   renderFoldRail();
 }
 
+async function loadReportSourceTruth() {
+  try {
+    const res = await fetch("/api/report/source-of-truth", { cache: "no-store" });
+    if (!res.ok) return;
+    reportSourceTruth = await res.json();
+    const button = $("openFinalReportBtn");
+    if (button) {
+      button.title = `Active final DOCX: ${reportSourceTruth.active_docx}`;
+      button.classList.toggle("missing", !reportSourceTruth.active_exists);
+      button.textContent = reportSourceTruth.active_exists ? "Open Final DOCX" : "Final DOCX missing";
+    }
+  } catch {}
+}
+
 function visibleRunIds() {
   return [...manualOpenRunIds].slice(0, 12);
 }
@@ -1791,6 +1882,22 @@ async function stopOne(runId) {
   poll();
 }
 
+async function openFinalReport() {
+  const button = $("openFinalReportBtn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Opening final";
+  }
+  const res = await fetch("/api/report/open-final", { method: "POST" });
+  if (res.ok) await loadReportSourceTruth();
+  if (button) {
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = reportSourceTruth?.active_exists ? "Open Final DOCX" : "Final DOCX missing";
+    }, 900);
+  }
+}
+
 async function submitFeedback(node) {
   const value = node.textContent.trim();
   const previous = node.dataset.previous || "";
@@ -1834,6 +1941,7 @@ function escapeHtml(value) {
 }
 
 $("startBtn").addEventListener("click", startRun);
+$("openFinalReportBtn")?.addEventListener("click", openFinalReport);
 $("startValidationBtn")?.addEventListener("click", startValidation);
 $("startRegressionRecheckBtn")?.addEventListener("click", () => startRegressionRecheck());
 $("structurePickerBtn").addEventListener("click", () => {
@@ -1891,6 +1999,8 @@ document.addEventListener("click", (event) => {
   if (good) saveAnomaly(good, "good");
   const replaySolution = event.target.closest(".replay-solution");
   if (replaySolution) startRegressionRecheck(replaySolution.dataset.solutionId || "");
+  const playProof = event.target.closest(".play-proof-case");
+  if (playProof) startRegressionRecheck(playProof.dataset.solutionId || "", playProof.dataset.caseKey || "");
   const playCase = event.target.closest(".play-case");
   if (playCase) startRegressionRecheck(playCase.dataset.solutionId || "", playCase.dataset.caseKey || "");
   const solutionFeedback = event.target.closest(".save-solution-feedback");
@@ -2110,6 +2220,7 @@ document.addEventListener("mouseout", (event) => {
 });
 window.addEventListener("resize", hideFloatingPreview, { passive: true });
 loadStructures();
+loadReportSourceTruth();
 renderFeedbackConsole();
 poll();
 pollActivity();
@@ -2121,7 +2232,7 @@ setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollFeedbackStatus, 3500);
-setInterval(pollRegressionSolutions, 3500);
+setInterval(pollRegressionSolutions, 1000);
 setInterval(pollRegressionLedger, 3500);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);

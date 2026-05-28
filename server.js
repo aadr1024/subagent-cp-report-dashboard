@@ -6,6 +6,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
+const REPORT_SOURCE_OF_TRUTH = path.join(ROOT, "report-source-of-truth.json");
 const RUNS = path.join(ROOT, "runs");
 const CURRENT = path.join(RUNS, "current-run.txt");
 const GLOBAL_FEEDBACK = path.join(RUNS, "global-feedback.jsonl");
@@ -97,6 +98,38 @@ function readJsonFile(file, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function reportSourceOfTruth() {
+  const data = readJsonFile(REPORT_SOURCE_OF_TRUTH, {});
+  const role = data.active_output_role || "working_final_docx";
+  const activeRaw = data[role] || data.working_final_docx || "";
+  const originalRaw = data.original_docx || "";
+  if (!activeRaw || !originalRaw) throw new Error("report-source-of-truth.json is missing report paths");
+  const active = path.resolve(activeRaw);
+  const original = path.resolve(originalRaw);
+  if (data.never_write_original !== false && active === original) {
+    throw new Error("Report source-of-truth misconfigured: active output equals original DOCX");
+  }
+  return {
+    ...data,
+    active_docx: active,
+    original_docx: original,
+    active_exists: fs.existsSync(active),
+    original_exists: fs.existsSync(original),
+  };
+}
+
+function openFinalReport(res) {
+  const source = reportSourceOfTruth();
+  if (!source.active_exists) return json(res, 404, { error: "active final DOCX does not exist", source });
+  const child = spawn("open", ["-a", "Microsoft Word", source.active_docx], {
+    cwd: ROOT,
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  json(res, 202, { ok: true, opened: source.active_docx, source });
 }
 
 function thumbFor(sourceFile, size = 720) {
@@ -1228,6 +1261,8 @@ async function feedback(req, res) {
 
 async function api(req, res, url) {
   if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
+  if (url.pathname === "/api/report/source-of-truth") return json(res, 200, reportSourceOfTruth());
+  if (url.pathname === "/api/report/open-final") return openFinalReport(res);
   if (url.pathname === "/api/stats") return json(res, 200, stats());
   if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
   if (url.pathname === "/api/validation") return json(res, 200, validationPayload());

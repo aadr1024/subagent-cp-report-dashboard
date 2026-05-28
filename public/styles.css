@@ -103,6 +103,16 @@ button {
   cursor: pointer;
 }
 
+.secondary-btn {
+  background: #fffdf7;
+  color: var(--ink);
+}
+
+.secondary-btn.missing {
+  border-color: rgba(180, 52, 47, 0.4);
+  color: var(--red);
+}
+
 .picker {
   position: relative;
 }
@@ -2066,6 +2076,122 @@ main {
   font-size: 11px;
 }
 
+.play-proof-case {
+  background: var(--blue);
+  white-space: nowrap;
+}
+
+.proof-live {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid rgba(30, 99, 143, 0.22);
+  border-left: 5px solid var(--blue);
+  border-radius: 11px;
+  background: rgba(30, 99, 143, 0.045);
+}
+
+.proof-live.running {
+  border-left-color: var(--yellow);
+  background: rgba(201, 133, 17, 0.06);
+}
+
+.proof-live.complete {
+  border-left-color: var(--green);
+  background: rgba(29, 127, 78, 0.055);
+}
+
+.proof-live-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.proof-live-head strong {
+  font-size: 13px;
+}
+
+.proof-live-head span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.proof-live-nodes {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(96px, 1fr));
+  gap: 6px;
+}
+
+.proof-live-node {
+  display: grid;
+  gap: 4px;
+  min-height: 86px;
+  padding: 8px;
+  border: 1px solid rgba(217, 209, 194, 0.82);
+  border-top: 4px solid var(--gray);
+  border-radius: 9px;
+  background: #fffdf7;
+}
+
+.proof-live-node.running,
+.proof-live-node.active {
+  border-top-color: var(--yellow);
+  background: rgba(201, 133, 17, 0.1);
+}
+
+.proof-live-node.complete {
+  border-top-color: var(--green);
+  background: rgba(29, 127, 78, 0.08);
+}
+
+.proof-live-node.failed {
+  border-top-color: var(--red);
+}
+
+.proof-live-node b {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 10px;
+}
+
+.proof-live-node strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.proof-live-node span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.proof-live-current {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(217, 209, 194, 0.78);
+  border-radius: 9px;
+  background: rgba(255, 253, 247, 0.78);
+}
+
+.proof-live-current strong {
+  color: var(--blue);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.proof-live-current span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .proof-grid {
   display: grid;
   grid-template-columns: minmax(180px, 0.55fr) minmax(260px, 1fr);
@@ -2161,6 +2287,16 @@ main {
 
 .trace-step.corrected {
   border-left: 5px solid var(--green);
+}
+
+.trace-step.running,
+.trace-step.active {
+  outline: 2px solid rgba(201, 133, 17, 0.36);
+  background: rgba(201, 133, 17, 0.08);
+}
+
+.trace-step.complete {
+  outline: 2px solid rgba(29, 127, 78, 0.22);
 }
 
 .trace-step span,
@@ -2835,6 +2971,11 @@ main {
   }
 
   .trace-row {
+    grid-template-columns: 1fr;
+  }
+
+  .proof-live-nodes,
+  .proof-live-current {
     grid-template-columns: 1fr;
   }
 
