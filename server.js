@@ -532,6 +532,14 @@ function evidenceSummary(item) {
   return {
     structures,
     agents,
+    items: evidence.map((entry) => ({
+      structure: entry.structure || null,
+      agent: entry.agent || null,
+      row: entry.row || null,
+      station: entry.station || null,
+      source_image: entry.source_image || null,
+      value: entry.value ?? null,
+    })).filter((entry) => entry.source_image).slice(0, 12),
     images: evidence.map((entry) => entry.source_image).filter(Boolean).slice(0, 8),
     values: evidence.map((entry) => entry.value).filter((value) => value !== undefined && value !== null).slice(0, 8),
   };

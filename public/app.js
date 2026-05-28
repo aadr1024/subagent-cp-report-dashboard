@@ -1083,6 +1083,7 @@ function solutionRenderKey(payload) {
       status: solution.status,
       counts: solution.counts,
       latest: solution.latest_recheck_id,
+      feedback: (solution.feedback || []).map((item) => `${item.at}:${item.feedback}`),
       cases: (solution.cases || []).map((item) => ({
         signature: item.signature,
         outcome: item.outcome,
@@ -1143,6 +1144,12 @@ function renderSolutionCard(solution) {
       </div>
       <div class="solution-graph">${graph.map((step, index) => `<div><b>${index + 1}</b><span>${escapeHtml(step)}</span></div>`).join("")}</div>
     </div>
+    <div class="solution-section-guide">
+      <span><strong>Fix</strong> = behavior the next leaf agents should follow.</span>
+      <span><strong>Detection</strong> = when this behavior should trigger.</span>
+      <span><strong>Replay</strong> = proof run showing the recorded cases now pass.</span>
+    </div>
+    ${renderSolutionProof(solution)}
     ${lessons.length ? `<div class="solution-lessons">${lessons.map((lesson) => `<mark>${escapeHtml(lesson)}</mark>`).join("")}</div>` : ""}
     <div class="solution-cases">${(solution.cases || []).map(renderSolutionCase).join("")}</div>
     <div class="solution-feedback-box">
@@ -1159,6 +1166,75 @@ function renderSolutionCard(solution) {
       <small>Runs only matching recorded cases through the focused OpenAI recheck leaf.</small>
     </div>
   </article>`;
+}
+
+function representativeSolutionCase(solution) {
+  const cases = solution.cases || [];
+  return cases.find((item) => ["solved", "corrected", "source-corrected", "accepted-source"].includes(item.outcome) && item.result?.readings?.length)
+    || cases.find((item) => item.result?.readings?.length)
+    || cases[0]
+    || null;
+}
+
+function evidenceItemForReading(caseItem, reading) {
+  const items = caseItem?.evidence?.items || [];
+  return items.find((item) => item.source_image === reading?.source_image) || items[0] || null;
+}
+
+function siteThumbForEvidence(item, size = 620) {
+  if (!item?.structure || !item?.source_image) return "";
+  const folder = knownStructures.find((entry) => String(entry.structure) === String(item.structure))?.folder || "";
+  return folder ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(item.source_image)}?size=${encodeURIComponent(size)}` : "";
+}
+
+function logicForSolutionReading(solution, caseItem, reading) {
+  const result = caseItem?.result || {};
+  const parts = [
+    solution.title ? `${solution.title}: ${solution.solution}` : solution.solution,
+    result.summary,
+    reading?.notes,
+    reading?.issue_present === true ? "This reading remains flagged for review/evidence attention." : "This reading is accepted under the current replay logic.",
+  ].filter(Boolean);
+  return parts.join(" ");
+}
+
+function renderSolutionProof(solution) {
+  const item = representativeSolutionCase(solution);
+  const readings = item?.result?.readings || [];
+  const reading = readings.find((entry) => String(entry.old_value ?? "") !== String(entry.rechecked_value ?? "")) || readings[0];
+  const evidence = evidenceItemForReading(item, reading);
+  const thumb = siteThumbForEvidence(evidence, 720);
+  if (!item || !reading) return "";
+  const logic = logicForSolutionReading(solution, item, reading);
+  const oldValue = reading.old_value ?? evidence?.value ?? "";
+  const newValue = reading.rechecked_value ?? "";
+  return `<div class="solution-proof">
+    <div class="proof-head">
+      <strong>Representative replay case</strong>
+      <span>${escapeHtml(item.title || "")}</span>
+    </div>
+    <div class="proof-grid">
+      <figure class="proof-image">
+        ${thumb ? `<img src="${escapeHtml(thumb)}" alt="${escapeHtml(reading.source_image || evidence?.source_image || "evidence")}" loading="lazy" decoding="async" fetchpriority="low" />` : `<div class="proof-image-missing">image unavailable</div>`}
+        <figcaption>STR ${escapeHtml(evidence?.structure || item.evidence?.structures?.[0] || "?")} · ${escapeHtml(reading.source_image || evidence?.source_image || "")}</figcaption>
+      </figure>
+      <div class="proof-values">
+        <div class="proof-value old logic-chip" data-logic="${escapeHtml(`Original extracted/suspect value. ${logic}`)}" title="${escapeHtml(logic)}">
+          <span>Old extraction</span>
+          <strong>${escapeHtml(oldValue)}</strong>
+        </div>
+        <div class="proof-arrow">-></div>
+        <div class="proof-value corrected logic-chip" data-logic="${escapeHtml(`Replay-corrected/current source-backed value. ${logic}`)}" title="${escapeHtml(logic)}">
+          <span>Replay result</span>
+          <strong>${escapeHtml(newValue)} ${escapeHtml(reading.unit || "")}</strong>
+        </div>
+        <div class="proof-logic logic-chip" data-logic="${escapeHtml(logic)}" title="${escapeHtml(logic)}">
+          <span>Logic used</span>
+          <p>${escapeHtml(item.result?.summary || solution.solution || "")}</p>
+        </div>
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderSolutionCase(item) {
