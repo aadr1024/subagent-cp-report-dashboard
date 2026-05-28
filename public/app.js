@@ -31,6 +31,7 @@ let floatingPreviewHideTimer = null;
 let latestFeedbackStatus = null;
 let latestRegressionCases = [];
 let latestRegressionSolutions = [];
+let latestSolutionReplay = null;
 let anomalyFloatingPreview = null;
 const anomalyNoteDrafts = new Map();
 let validationEditLockUntil = 0;
@@ -1078,6 +1079,15 @@ async function pollFeedbackStatus() {
 function solutionRenderKey(payload) {
   return JSON.stringify({
     totals: payload.totals || {},
+    live: payload.live_replay ? {
+      id: payload.live_replay.recheck_id,
+      status: payload.live_replay.status,
+      done: payload.live_replay.cases_done,
+      total: payload.live_replay.cases_total,
+      case_key: payload.live_replay.case_key,
+      active_node: payload.live_replay.active_node,
+      node_events: (payload.live_replay.node_events || []).length,
+    } : null,
     solutions: (payload.solutions || []).map((solution) => ({
       id: solution.solution_id,
       status: solution.status,
@@ -1096,6 +1106,7 @@ function solutionRenderKey(payload) {
 
 function renderSolutionSuite(payload) {
   latestRegressionSolutions = payload.solutions || [];
+  latestSolutionReplay = payload.live_replay || null;
   const panel = $("solutionSuite");
   if (!panel) return;
   const renderKey = solutionRenderKey(payload);
@@ -1145,7 +1156,7 @@ function renderSolutionCard(solution) {
     </div>
     ${renderSolutionProof(solution)}
     ${lessons.length ? `<div class="solution-lessons">${lessons.map((lesson) => `<mark>${escapeHtml(lesson)}</mark>`).join("")}</div>` : ""}
-    <div class="solution-cases">${(solution.cases || []).map(renderSolutionCase).join("")}</div>
+    <div class="solution-cases">${(solution.cases || []).map((item) => renderSolutionCase(item, solution)).join("")}</div>
     <div class="solution-feedback-box">
       <textarea rows="2" placeholder="Give guidance for this general solution. Example: assume faint Table 3 LCD minus unless source clearly proves positive.">${escapeHtml("")}</textarea>
       <button class="small-btn save-solution-feedback" data-solution-id="${escapeHtml(solution.solution_id || "")}">Save guidance</button>
@@ -1318,7 +1329,45 @@ function renderSolutionProof(solution) {
   </div>`;
 }
 
-function renderSolutionCase(item) {
+function caseReplayFor(item) {
+  const replay = latestSolutionReplay;
+  if (!replay) return null;
+  const key = replay.case_key || replay.active_signature || replay.active_case_id || "";
+  const matches = key && [item.case_id, item.signature].map(String).includes(String(key));
+  if (!matches) return null;
+  return replay;
+}
+
+function renderLiveCaseReplay(item) {
+  const replay = caseReplayFor(item);
+  if (!replay) return "";
+  const nodes = ["detector-agent", "evidence-leaf", "rule-gate", "focused-openai-leaf", "replay-verifier", "prompt-memory"];
+  const events = (replay.node_events || []).filter((event) => [item.case_id, item.signature].map(String).includes(String(event.case_id)) || [item.case_id, item.signature].map(String).includes(String(event.signature)));
+  const latestByNode = new Map(events.map((event) => [event.node, event]));
+  const activeNode = replay.status === "running" ? (replay.active_node || events.at(-1)?.node || "") : "";
+  return `<div class="case-live-replay ${escapeHtml(replay.status || "")}">
+    <div class="case-live-head">
+      <strong>${replay.status === "running" ? "Live replay running" : "Latest case replay"}</strong>
+      <span>${escapeHtml(replay.recheck_id || "")}</span>
+    </div>
+    <div class="case-live-nodes">${nodes.map((node, index) => {
+      const event = latestByNode.get(node);
+      const status = event?.status || event?.node_status || (node === activeNode ? "running" : "pending");
+      return `<div class="case-live-node ${escapeHtml(status)} ${node === activeNode ? "active" : ""}">
+        <b>${index + 1}</b>
+        <strong>${escapeHtml(node.replaceAll("-", " "))}</strong>
+        <span>${escapeHtml(event?.message || (node === activeNode ? "active now" : "waiting"))}</span>
+      </div>`;
+    }).join("")}</div>
+    <div class="case-live-log">${events.slice(-8).reverse().map((event) => `<div>
+      <span>${fmtTime(event.at)}</span>
+      <strong>${escapeHtml(String(event.node || "").replaceAll("-", " "))}</strong>
+      <em>${escapeHtml(event.message || "")}</em>
+    </div>`).join("") || `<div class="message">Replay events will appear here after you press play.</div>`}</div>
+  </div>`;
+}
+
+function renderSolutionCase(item, solution) {
   const result = item.result || null;
   const readings = result?.readings || [];
   const evidence = item.evidence || {};
@@ -1330,6 +1379,11 @@ function renderSolutionCase(item) {
     <mark>${escapeHtml(item.outcome || "not-run")}</mark>
     ${result?.summary ? `<em>${escapeHtml(result.summary)}</em>` : `<em>${escapeHtml(item.note || "Recorded case waiting for replay.")}</em>`}
     ${readings.length ? `<div class="solution-readings">${readings.slice(0, 6).map((reading) => `<span>${escapeHtml(reading.source_image || "")}: ${escapeHtml(reading.old_value || "")} -> ${escapeHtml(reading.rechecked_value || "")} ${escapeHtml(reading.unit || "")}</span>`).join("")}</div>` : ""}
+    <div class="solution-case-actions">
+      <button class="small-btn play-case" data-solution-id="${escapeHtml(solution?.solution_id || "")}" data-case-key="${escapeHtml(item.signature || item.case_id || "")}">Play this case</button>
+      <small>Runs only this recorded error case and streams the agent nodes here.</small>
+    </div>
+    ${renderLiveCaseReplay(item)}
   </div>`;
 }
 
@@ -1422,18 +1476,23 @@ async function pollRegressionLedger() {
   } catch {}
 }
 
-async function startRegressionRecheck(solutionId = "") {
-  const button = solutionId ? document.querySelector(`.replay-solution[data-solution-id="${CSS.escape(solutionId)}"]`) : $("startRegressionRecheckBtn");
+async function startRegressionRecheck(solutionId = "", caseKey = "") {
+  const button = caseKey
+    ? document.querySelector(`.play-case[data-case-key="${CSS.escape(caseKey)}"]`)
+    : solutionId ? document.querySelector(`.replay-solution[data-solution-id="${CSS.escape(solutionId)}"]`) : $("startRegressionRecheckBtn");
   if (button) {
     button.disabled = true;
-    button.textContent = solutionId ? "Replaying" : "Starting rechecks";
+    button.textContent = caseKey ? "Playing" : solutionId ? "Replaying" : "Starting rechecks";
   }
-  const suffix = solutionId ? `?solution=${encodeURIComponent(solutionId)}` : "";
+  const params = new URLSearchParams();
+  if (solutionId) params.set("solution", solutionId);
+  if (caseKey) params.set("case", caseKey);
+  const suffix = params.toString() ? `?${params}` : "";
   await fetch(`/api/regression/recheck/start${suffix}`, { method: "POST" });
   setTimeout(() => {
     if (button) {
       button.disabled = false;
-      button.textContent = solutionId ? "Replay this solution" : "Run focused rechecks";
+      button.textContent = caseKey ? "Play this case" : solutionId ? "Replay this solution" : "Run focused rechecks";
     }
   }, 1600);
   pollRegressionSolutions();
@@ -1832,6 +1891,8 @@ document.addEventListener("click", (event) => {
   if (good) saveAnomaly(good, "good");
   const replaySolution = event.target.closest(".replay-solution");
   if (replaySolution) startRegressionRecheck(replaySolution.dataset.solutionId || "");
+  const playCase = event.target.closest(".play-case");
+  if (playCase) startRegressionRecheck(playCase.dataset.solutionId || "", playCase.dataset.caseKey || "");
   const solutionFeedback = event.target.closest(".save-solution-feedback");
   if (solutionFeedback) saveSolutionFeedback(solutionFeedback);
   const chip = event.target.closest(".reading-chip");

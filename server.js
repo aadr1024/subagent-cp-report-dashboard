@@ -615,8 +615,10 @@ function regressionSolutions() {
     const rank = { open: 0, partial: 1, "not-run": 2, solved: 3 };
     return (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.counts.total - a.counts.total;
   });
+  const replayState = regressionRechecks().latest;
   return {
     updated_at: new Date().toISOString(),
+    live_replay: replayState || null,
     solutions,
     totals: solutions.reduce((acc, solution) => {
       acc.solutions += 1;
@@ -680,6 +682,7 @@ function regressionRechecks() {
 function startRegressionRecheck(req, res, url) {
   const python = process.env.PYTHON || "python3";
   const solutionId = String(url.searchParams.get("solution") || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const caseKey = String(url.searchParams.get("case") || "").replace(/[^a-zA-Z0-9_.:-]/g, "");
   const recheckId = `${stamp()}-regression-recheck`;
   const dir = path.join(REGRESSION_RECHECKS, recheckId);
   fs.mkdirSync(dir, { recursive: true });
@@ -687,20 +690,21 @@ function startRegressionRecheck(req, res, url) {
   env.PYTHONPATH = SBA_SRC + (env.PYTHONPATH ? `:${env.PYTHONPATH}` : "");
   const args = [path.join(ROOT, "regression_recheck.py"), "--recheck-id", recheckId];
   if (solutionId) args.push("--solution-id", solutionId, "--limit", "32");
+  if (caseKey) args.push("--case-key", caseKey, "--limit", "1");
   const child = spawn(python, args, {
     cwd: ROOT,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const log = path.join(REGRESSION_RECHECKS, "recheck-spawn.log");
-  fs.appendFileSync(log, `\n[start] pid=${child.pid} recheck=${recheckId} solution=${solutionId || "all"} at=${new Date().toISOString()}\n`);
+  fs.appendFileSync(log, `\n[start] pid=${child.pid} recheck=${recheckId} solution=${solutionId || "all"} case=${caseKey || "all"} at=${new Date().toISOString()}\n`);
   child.stdout.on("data", (chunk) => fs.appendFileSync(log, chunk));
   child.stderr.on("data", (chunk) => fs.appendFileSync(log, chunk));
-  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, recheck_id: recheckId, solution_id: solutionId || null, started_at: new Date().toISOString() }, null, 2) + "\n");
+  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, recheck_id: recheckId, solution_id: solutionId || null, case_key: caseKey || null, started_at: new Date().toISOString() }, null, 2) + "\n");
   child.on("exit", (code, signal) => {
     fs.appendFileSync(log, `[exit] pid=${child.pid} code=${code} signal=${signal}\n`);
   });
-  json(res, 202, { ok: true, recheck_id: recheckId, solution_id: solutionId || null, pid: child.pid });
+  json(res, 202, { ok: true, recheck_id: recheckId, solution_id: solutionId || null, case_key: caseKey || null, pid: child.pid });
 }
 
 function noteLooksLikeErrorCase(note) {

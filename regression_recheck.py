@@ -93,6 +93,26 @@ class RecheckLog:
         self.state["messages"] = self.state["messages"][-120:]
         self.write()
 
+    def node(self, case: dict, node: str, status: str, message: str, **data):
+        item = {
+            "at": now(),
+            "case_id": case.get("case_id"),
+            "signature": case.get("signature"),
+            "title": case.get("title"),
+            "node": node,
+            "status": status,
+            "message": message,
+            **data,
+        }
+        self.state["active_case_id"] = case.get("case_id")
+        self.state["active_signature"] = case.get("signature")
+        self.state["active_case_title"] = case.get("title")
+        self.state["active_node"] = node if status == "running" else self.state.get("active_node")
+        self.state.setdefault("node_events", []).append(item)
+        self.state["node_events"] = self.state["node_events"][-160:]
+        self.write()
+        self.event("node", message, node=node, node_status=status, case_id=case.get("case_id"), signature=case.get("signature"), **data)
+
     def finish(self, status: str, message: str):
         self.state["status"] = status
         self.state["finished_at"] = now()
@@ -237,28 +257,39 @@ def prompt_for_case(case: dict, solution_id: str | None = None) -> str:
 
 
 def run_case(case: dict, log: RecheckLog, solution_id: str | None = None) -> dict:
+    effective_solution_id = solution_id or solution_id_for_case(case)
+    log.node(case, "detector-agent", "running", "Detector agent matched the recorded case to a reusable solution class.", solution_id=effective_solution_id)
     evidence = case.get("anomaly", {}).get("evidence") or []
-    content = [{"type": "input_text", "text": prompt_for_case(case, solution_id)}]
+    content = [{"type": "input_text", "text": prompt_for_case(case, effective_solution_id)}]
     image_count = 0
+    log.node(case, "evidence-leaf", "running", "Evidence leaf is loading source image bundle.", evidence_count=len(evidence))
     for item in evidence[:12]:
         path = image_path(str(item.get("structure")), str(item.get("source_image")))
         content.append({"type": "input_text", "text": f"structure={item.get('structure')}; agent={item.get('agent')}; source_image={item.get('source_image')}; old_value={item.get('value')}"})
         if path:
             content.append(as_input_image(compress(path, log.run_dir)))
             image_count += 1
+    log.node(case, "evidence-leaf", "complete", f"Evidence leaf attached {image_count} image(s).", image_count=image_count)
+    log.node(case, "rule-gate", "running", "Rule gate is applying the reusable solution prompt and human guidance.", solution_id=effective_solution_id)
+    log.node(case, "rule-gate", "complete", "Rule gate packaged the focused replay prompt.", solution_id=effective_solution_id)
     log.event("case", f"Rechecking {case.get('title')}", case_id=case.get("case_id"), image_count=image_count)
     started = time.time()
+    log.node(case, "focused-openai-leaf", "running", "Focused OpenAI vision leaf is re-reading the evidence images.", image_count=image_count)
     response = create_response(model=MODEL, content=content, start_dir=log.run_dir / "llm-usage", reasoning_effort="low")
     elapsed = round(time.time() - started, 2)
+    log.node(case, "focused-openai-leaf", "complete", f"OpenAI replay response returned in {elapsed}s.", elapsed_seconds=elapsed, response_id=response.get("id"))
     text = response_text(response)
+    log.node(case, "replay-verifier", "running", "Replay verifier is parsing the result and comparing old value against source-backed value.")
     parsed = strict_json(text)
+    log.node(case, "replay-verifier", "complete", f"Replay verifier classified case as {parsed.get('status')}.", replay_status=parsed.get("status"))
+    log.node(case, "prompt-memory", "complete", "Prompt memory captured reusable lessons for future leaf agents.", lesson_count=len(parsed.get("agent_prompt_lessons") or []))
     return {
         "case_id": case.get("case_id"),
         "signature": case.get("signature"),
         "title": case.get("title"),
         "kind": case.get("kind"),
         "severity": case.get("severity"),
-        "solution_id": solution_id_for_case(case),
+        "solution_id": effective_solution_id,
         "review_note": case.get("note"),
         "image_count": image_count,
         "elapsed_seconds": elapsed,
@@ -272,6 +303,7 @@ def main() -> None:
     parser.add_argument("--recheck-id", required=True)
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--solution-id", choices=sorted(SOLUTION_RULES), default=None)
+    parser.add_argument("--case-key", default=None)
     args = parser.parse_args()
 
     run_dir = RECHECKS / args.recheck_id
@@ -282,6 +314,9 @@ def main() -> None:
         cases = [case for case in cases if solution_id_for_case(case) == args.solution_id]
         log.state["solution_id"] = args.solution_id
         log.state["solution_title"] = SOLUTION_RULES[args.solution_id]["title"]
+    if args.case_key:
+        cases = [case for case in cases if args.case_key in {str(case.get("case_id")), str(case.get("signature"))}]
+        log.state["case_key"] = args.case_key
     cases = cases[: args.limit]
     log.state["cases_total"] = len(cases)
     log.write()
