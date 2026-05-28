@@ -23,6 +23,7 @@ let pendingSolutionRender = null;
 let pendingRegressionRender = null;
 let activityEvents = [];
 let activityRuns = [];
+let activityConcurrency = null;
 let activityUpdatedAt = null;
 let latestValidation = null;
 let lastSolutionRenderKey = "";
@@ -798,6 +799,7 @@ function renderActivityTicker() {
   const box = ensureActivityTicker();
   const latest = activityEvents[0];
   const active = activityRuns.length;
+  const c = activityConcurrency || {};
   const statusText = active ? `${active} active run${active === 1 ? "" : "s"}` : "no active runs";
   const headline = latest
     ? `STR ${latest.structure || "?"} · ${latest.type || "event"} · ${timeAgo(latest.at)}`
@@ -810,6 +812,13 @@ function renderActivityTicker() {
     <div class="activity-current">
       <span>${escapeHtml(headline)}</span>
       <em>${escapeHtml(message)}</em>
+    </div>
+    <div class="activity-concurrency">
+      <span class="activity-tag hot">active ${Number(c.total_active || 0)}</span>
+      <span class="activity-tag api">API now ${Number(c.api_calls_active || 0)}</span>
+      <span class="activity-tag write">DOCX ${Number(c.docx_writes_active || 0)}</span>
+      <span class="activity-tag validate">validation ${Number(c.validations_active || 0)}</span>
+      <span class="activity-tag replay">recheck ${Number(c.rechecks_active || 0)}</span>
     </div>
     <div class="activity-run-list">${activityRuns.slice(0, 6).map((run) => `<div class="activity-run">
       <strong>STR ${escapeHtml(run.structure || "?")}</strong>
@@ -831,6 +840,7 @@ async function pollActivity() {
     const payload = await res.json();
     activityEvents = payload.events || [];
     activityRuns = payload.active_runs || [];
+    activityConcurrency = payload.concurrency || null;
     activityUpdatedAt = payload.updated_at || new Date().toISOString();
     renderActivityTicker();
   } catch {}

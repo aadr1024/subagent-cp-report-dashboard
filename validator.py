@@ -20,6 +20,7 @@ RUNS = ROOT / "runs"
 VALIDATIONS = RUNS / "validations"
 VALIDATION_REVIEW_METADATA = RUNS / "validation-review-metadata.jsonl"
 FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
+SOURCE_BACKED_EXCEPTIONS = RUNS / "source-backed-exceptions.jsonl"
 MODEL = "gpt-5.2"
 
 
@@ -41,7 +42,9 @@ class ValidationLog:
             "agents": {
                 "validation-orchestrator": {"name": "validation-orchestrator", "status": "running", "message": "Collecting extracted STR dataset"},
                 "shape-validator": {"name": "shape-validator", "status": "pending", "message": "Queued"},
-                "range-sign-validator": {"name": "range-sign-validator", "status": "pending", "message": "Queued"},
+                "potential-sign-validator": {"name": "potential-sign-validator", "status": "pending", "message": "Queued"},
+                "decimal-scale-validator": {"name": "decimal-scale-validator", "status": "pending", "message": "Queued"},
+                "unit-sanity-validator": {"name": "unit-sanity-validator", "status": "pending", "message": "Queued"},
                 "station-pair-validator": {"name": "station-pair-validator", "status": "pending", "message": "Queued"},
                 "llm-reviewer": {"name": "llm-reviewer", "status": "pending", "message": "Queued"},
             },
@@ -207,7 +210,7 @@ def deterministic_flags(dataset: dict, log: ValidationLog) -> list[dict]:
             ))
     log.agent("shape-validator", "complete", f"Shape pass produced {len(flags)} flags")
 
-    log.agent("range-sign-validator", "running", "Checking sign and magnitude outliers")
+    log.agent("potential-sign-validator", "running", "Checking potential sign, faint-minus, and polarity anomalies")
     by_agent = {}
     for record in records:
         if record["numeric"] is not None:
@@ -249,7 +252,100 @@ def deterministic_flags(dataset: dict, log: ValidationLog) -> list[dict]:
                     [record],
                     0.72,
                 ))
-    log.agent("range-sign-validator", "complete", f"Range/sign pass produced {len(flags) - before} flags")
+    for structure, items in dataset["structures"].items():
+        potentials = [item for item in items if item["agent"].startswith("table3-") or item["agent"] == "table6-potentials"]
+        by_potential_agent = {}
+        for item in potentials:
+            by_potential_agent.setdefault(item["agent"], []).append(item)
+        for agent, agent_items in by_potential_agent.items():
+            positive = [item for item in agent_items if item["numeric"] is not None and item["numeric"] > 0]
+            negative = [item for item in agent_items if item["numeric"] is not None and item["numeric"] < 0]
+            note_negative = [item for item in agent_items if re.search(r"\bminus|negative|leading\s*-|faint\s*-", str(item.get("notes") or ""), re.I) and item["numeric"] is not None and item["numeric"] > 0]
+            if note_negative:
+                flags.append(anomaly(
+                    "potential_sign_note_mismatch",
+                    "high",
+                    f"STR {structure} {agent} values stored positive but notes/evidence say negative",
+                    "The stored numeric sign conflicts with extraction notes mentioning a minus/negative sign. This is a likely dropped-minus transcription error.",
+                    note_negative,
+                    0.94,
+                ))
+            if positive and negative:
+                flags.append(anomaly(
+                    "mixed_potential_polarity",
+                    "medium",
+                    f"STR {structure} {agent} mixes positive and negative potential values",
+                    "Mixed polarity in a local Table 3/Table 6 group requires source review: either dropped minus signs or true source-positive/reversed-lead readings.",
+                    [*positive[:6], *negative[:6]],
+                    0.82,
+                ))
+            if positive and len(positive) == len(agent_items) and (agent.startswith("table3-") or agent == "table6-potentials"):
+                flags.append(anomaly(
+                    "source_positive_potential_review",
+                    "medium",
+                    f"STR {structure} {agent} has all-positive potential values",
+                    "Table 3/Table 6 potentials are usually negative. If LCDs truly show no minus, keep source-positive values but flag polarity/reverse-lead review.",
+                    positive[:8],
+                    0.76,
+                ))
+    log.agent("potential-sign-validator", "complete", f"Potential sign pass produced {len(flags) - before} flags")
+
+    log.agent("decimal-scale-validator", "running", "Checking missed decimal and magnitude-scale anomalies")
+    before = len(flags)
+    for agent, items in by_agent.items():
+        for record in items:
+            value = record["numeric"]
+            if value is None:
+                continue
+            abs_value = abs(value)
+            is_current = agent in {"table4-stations", "table5-currents"}
+            if is_current and abs_value >= 250:
+                flags.append(anomaly(
+                    "current_decimal_scale",
+                    "high" if abs_value >= 1000 else "medium",
+                    f"STR {record['structure']} {agent} value {record['value']} may have missed decimal point",
+                    "Current/shunt LCD readings with very large magnitudes often come from missed decimal points and should be source-rechecked before DOCX write.",
+                    [record],
+                    0.88,
+                ))
+            if (agent.startswith("table3-") or agent == "table6-potentials") and 0 < abs_value < 0.1:
+                peers = [abs(item["numeric"]) for item in items if item["numeric"] is not None and item is not record]
+                peer_median = sorted(peers)[len(peers) // 2] if peers else None
+                if peer_median and peer_median >= 0.5:
+                    flags.append(anomaly(
+                        "potential_decimal_scale",
+                        "high",
+                        f"STR {record['structure']} {agent} value {record['value']} is about 10x smaller than peers",
+                        "Potential value is much smaller than neighboring readings; re-zoom for dropped digit/decimal and faint minus sign.",
+                        [record],
+                        0.88,
+                    ))
+    log.agent("decimal-scale-validator", "complete", f"Decimal/scale pass produced {len(flags) - before} flags")
+
+    log.agent("unit-sanity-validator", "running", "Checking table/unit consistency anomalies")
+    before = len(flags)
+    for record in records:
+        unit = str(record.get("unit") or "")
+        agent = record["agent"]
+        if (agent.startswith("table3-") or agent == "table6-potentials") and unit and not re.search(r"\bV\b", unit, re.I):
+            flags.append(anomaly(
+                "unit_sanity",
+                "medium",
+                f"STR {record['structure']} {agent} has non-voltage unit {unit}",
+                "Table 3/Table 6 potentials should be voltage readings; unit inconsistency needs review.",
+                [record],
+                0.78,
+            ))
+        if agent == "table4-stations" and unit and not re.search(r"\bm?A\b|\bmV\b|amp|volt", unit, re.I):
+            flags.append(anomaly(
+                "unit_sanity",
+                "medium",
+                f"STR {record['structure']} Table 4 has unusual unit {unit}",
+                "Table 4 station rows should be current or shunt-voltage measurements; unusual units need review.",
+                [record],
+                0.72,
+            ))
+    log.agent("unit-sanity-validator", "complete", f"Unit sanity pass produced {len(flags) - before} flags")
 
     log.agent("station-pair-validator", "running", "Checking station/anode pairing coverage")
     before = len(flags)
@@ -351,33 +447,215 @@ def dedupe(anomalies: list[dict]) -> list[dict]:
     return out[:80]
 
 
-def prior_review_decisions() -> dict:
-    decisions = {}
-    if not VALIDATION_REVIEW_METADATA.exists():
-        return decisions
-    for line in VALIDATION_REVIEW_METADATA.read_text().splitlines():
-        if not line.strip():
+def cluster_key(item: dict) -> tuple | None:
+    kind = str(item.get("kind") or "")
+    cluster_kinds = {
+        "sign_outlier",
+        "potential_sign_note_mismatch",
+        "mixed_potential_polarity",
+        "source_positive_potential_review",
+        "current_decimal_scale",
+        "potential_decimal_scale",
+        "unit_sanity",
+    }
+    if kind not in cluster_kinds:
+        return None
+    evidence = item.get("evidence") or []
+    first = evidence[0] if evidence else {}
+    structure = first.get("structure")
+    agent = first.get("agent")
+    if not structure or not agent:
+        return None
+    class_name = "potential_sign" if kind in {"sign_outlier", "potential_sign_note_mismatch", "mixed_potential_polarity", "source_positive_potential_review"} else kind
+    return (class_name, structure, agent)
+
+
+def clustered(anomalies: list[dict]) -> list[dict]:
+    groups = {}
+    passthrough = []
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    for item in anomalies:
+        key = cluster_key(item)
+        if not key:
+            passthrough.append(item)
+            continue
+        group = groups.setdefault(key, [])
+        group.append(item)
+    out = passthrough[:]
+    for (class_name, structure, agent), items in groups.items():
+        evidence = []
+        seen = set()
+        for item in items:
+            for record in item.get("evidence") or []:
+                key = (record.get("run_id"), record.get("agent"), record.get("source_image"), record.get("value"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence.append(record)
+        worst = sorted(items, key=lambda item: severity_rank.get(item.get("severity"), 3))[0]
+        title_map = {
+            "potential_sign": f"STR {structure} {agent} potential sign/polarity evidence needs grouped replay",
+            "current_decimal_scale": f"STR {structure} {agent} current decimal-scale evidence needs grouped replay",
+            "potential_decimal_scale": f"STR {structure} {agent} potential decimal-scale evidence needs grouped replay",
+            "unit_sanity": f"STR {structure} {agent} unit consistency evidence needs grouped replay",
+        }
+        why = " | ".join(dict.fromkeys(str(item.get("why") or "") for item in items if item.get("why")))
+        fingerprint = json.dumps(
+            [(ev.get("structure"), ev.get("agent"), ev.get("source_image"), ev.get("value"), ev.get("numeric")) for ev in evidence],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        signature = hashlib.sha1(f"{class_name}|{structure}|{agent}|{fingerprint}".encode()).hexdigest()
+        out.append({
+            "id": re.sub(r"[^a-zA-Z0-9_-]+", "-", f"{class_name}-{structure}-{agent}-{signature[:12]}").strip("-")[:140],
+            "signature": signature,
+            "evidence_hash": hashlib.sha1(fingerprint.encode()).hexdigest(),
+            "kind": class_name,
+            "severity": worst.get("severity") or "medium",
+            "title": title_map.get(class_name, f"STR {structure} {agent} grouped validation evidence"),
+            "why": why or "Grouped first-pass validator evidence should be replayed together so correction happens in one source-backed pass.",
+            "confidence": max(float(item.get("confidence") or 0.0) for item in items),
+            "evidence": evidence[:12],
+            "status": "open",
+            "clustered_from": len(items),
+        })
+    return out
+
+
+def _jsonl_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
             continue
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        signature = item.get("signature")
-        if signature:
-            decisions[signature] = item
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
+def prior_review_decisions() -> dict:
+    accepted_statuses = {
+        "accepted_source_backed",
+        "source_backed_accepted",
+        "reviewed",
+        "resolved",
+        "good_job",
+        "saved",
+        "not_error",
+        "accepted",
+        "corrected",
+        "verified",
+    }
+    decisions = {}
+    for item in [*_jsonl_records(VALIDATION_REVIEW_METADATA), *_jsonl_records(FEEDBACK_PROCESSING)]:
+        status = str(item.get("status") or item.get("decision") or "").lower()
+        if status and status not in accepted_statuses:
+            continue
+        for key in (
+            item.get("signature"),
+            item.get("anomaly_signature"),
+            item.get("case_signature"),
+        ):
+            if key:
+                decisions[str(key)] = item
+        evidence_key = item.get("evidence_hash")
+        if evidence_key:
+            decisions[f"evidence:{evidence_key}"] = item
     return decisions
 
 
+def source_backed_exceptions() -> list[dict]:
+    accepted = []
+    for item in _jsonl_records(SOURCE_BACKED_EXCEPTIONS):
+        status = str(item.get("status") or "").lower()
+        if not status or status in {"accepted_source_backed", "source_backed_accepted", "source-backed"}:
+            accepted.append(item)
+    return accepted
+
+
+def anomaly_review_class(item: dict) -> str:
+    text = " ".join(str(item.get(key) or "").lower() for key in ("kind", "title", "why", "note", "status", "error_class"))
+    if any(token in text for token in ("sign", "polarity", "minus", "positive", "negative", "potential", "v dc")):
+        return "potential_sign"
+    if any(token in text for token in ("decimal", "magnitude", "scale", "outlier", "dropped digit")):
+        return "magnitude_scale"
+    if any(token in text for token in ("unit", "ma", "mv", "dc", "amp", "volt")):
+        return "unit_sanity"
+    if any(token in text for token in ("missing", "extra", "count", "four", "five", "expected")):
+        return "shape_count"
+    kind = str(item.get("kind") or item.get("error_class") or "review").lower()
+    return kind or "review"
+
+
+def evidence_groups(item: dict) -> dict[tuple[str, str], set[str]]:
+    groups: dict[tuple[str, str], set[str]] = {}
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+    if not evidence and isinstance(item.get("source_evidence"), list):
+        evidence = item.get("source_evidence")
+    for ev in evidence:
+        if not isinstance(ev, dict):
+            continue
+        structure = str(ev.get("structure") or item.get("structure") or "").strip()
+        agent = str(ev.get("agent") or ev.get("table") or item.get("agent") or "").strip()
+        source = str(ev.get("source_image") or ev.get("source") or ev.get("image") or "").strip()
+        if structure and agent and source:
+            groups.setdefault((structure, agent), set()).add(source)
+    structure = str(item.get("structure") or "").strip()
+    agent = str(item.get("agent") or "").strip()
+    source = str(item.get("source_image") or item.get("source") or "").strip()
+    if structure and agent and source:
+        groups.setdefault((structure, agent), set()).add(source)
+    return groups
+
+
+def source_backed_exception_match(item: dict, exceptions: list[dict]) -> dict | None:
+    item_groups = evidence_groups(item)
+    if not item_groups:
+        return None
+    item_class = anomaly_review_class(item)
+    for prior in exceptions:
+        prior_groups = evidence_groups(prior)
+        if not prior_groups:
+            continue
+        prior_class = anomaly_review_class(prior)
+        if prior_class != item_class:
+            continue
+        for key, item_sources in item_groups.items():
+            prior_sources = prior_groups.get(key)
+            if not prior_sources:
+                continue
+            overlap = item_sources & prior_sources
+            if not overlap:
+                continue
+            if item_sources <= prior_sources:
+                return prior
+            required = min(2, len(item_sources), len(prior_sources))
+            if len(overlap) >= required:
+                return prior
+    return None
+
+
 def suppress_previously_resolved(anomalies: list[dict]) -> tuple[list[dict], list[dict]]:
-    decisions = prior_review_decisions()
+    prior = prior_review_decisions()
+    source_exceptions = source_backed_exceptions()
     kept = []
     suppressed = []
     for item in anomalies:
-        prior = decisions.get(item.get("signature"))
-        if prior and prior.get("evidence_hash") == item.get("evidence_hash") and prior.get("status") in {"good", "reviewed", "dismissed"}:
-            suppressed.append({**item, "suppressed_by": prior})
-        else:
-            kept.append(item)
+        signature_key = str(item.get("signature") or "")
+        evidence_key = str(item.get("evidence_hash") or "")
+        matched = prior.get(signature_key) or prior.get(f"evidence:{evidence_key}")
+        if not matched:
+            matched = source_backed_exception_match(item, source_exceptions)
+        if matched:
+            suppressed.append({**item, "suppressed_by": matched})
+            continue
+        kept.append(item)
     return kept, suppressed
 
 
@@ -398,7 +676,7 @@ def main() -> None:
         except Exception as exc:
             llm_flags = []
             log.agent("llm-reviewer", "failed", f"OpenAI validation reviewer failed; keeping deterministic anomaly cards: {exc}")
-        anomalies, suppressed = suppress_previously_resolved(dedupe([*preflags, *llm_flags]))
+        anomalies, suppressed = suppress_previously_resolved(dedupe(clustered([*preflags, *llm_flags])))
         if suppressed:
             with FEEDBACK_PROCESSING.open("a") as handle:
                 for item in suppressed:

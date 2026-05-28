@@ -490,6 +490,33 @@ main {
   white-space: nowrap;
 }
 
+.activity-concurrency {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.activity-tag {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(217, 209, 194, 0.8);
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(255, 253, 247, 0.76);
+  color: var(--muted);
+}
+
+.activity-tag.hot { background: rgba(201, 133, 17, 0.16); color: var(--yellow); }
+.activity-tag.api { background: rgba(72, 137, 187, 0.14); color: #2d6d99; }
+.activity-tag.write { background: rgba(64, 151, 104, 0.14); color: #2e7c50; }
+.activity-tag.validate { background: rgba(194, 91, 61, 0.13); color: #a9462b; }
+.activity-tag.replay { background: rgba(109, 106, 102, 0.12); color: var(--gray); }
+
 .activity-run-list,
 .activity-tail {
   display: grid;

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -65,11 +67,30 @@ def read_jsonl(path: Path) -> list[dict]:
     return items
 
 
+def read_case_keys(path: str | None) -> set[str]:
+    if not path:
+        return set()
+    target = Path(path)
+    if not target.exists():
+        return set()
+    text = target.read_text().strip()
+    if not text:
+        return set()
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return {str(item) for item in data if item}
+    except json.JSONDecodeError:
+        pass
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
 class RecheckLog:
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
         self.events_path = run_dir / "events.jsonl"
         self.state_path = run_dir / "state.json"
+        self.lock = threading.RLock()
         self.seq = 0
         self.state = {
             "recheck_id": run_dir.name,
@@ -78,47 +99,69 @@ class RecheckLog:
             "updated_at": now(),
             "cases_total": 0,
             "cases_done": 0,
+            "active_api_calls": 0,
             "results": [],
         }
         self.write()
 
     def write(self):
-        self.state["updated_at"] = now()
-        self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
+        with self.lock:
+            self.state["updated_at"] = now()
+            self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
 
     def event(self, event_type: str, message: str, **data):
-        self.seq += 1
-        event = {"seq": self.seq, "at": now(), "type": event_type, "message": message, "data": data}
-        with self.events_path.open("a") as handle:
-            handle.write(json.dumps(event) + "\n")
-        self.state.setdefault("messages", []).append({"at": event["at"], "type": event_type, "message": message})
-        self.state["messages"] = self.state["messages"][-120:]
-        self.write()
+        with self.lock:
+            self.seq += 1
+            event = {"seq": self.seq, "at": now(), "type": event_type, "message": message, "data": data}
+            with self.events_path.open("a") as handle:
+                handle.write(json.dumps(event) + "\n")
+            self.state.setdefault("messages", []).append({"at": event["at"], "type": event_type, "message": message})
+            self.state["messages"] = self.state["messages"][-120:]
+            self.write()
 
     def node(self, case: dict, node: str, status: str, message: str, **data):
-        item = {
-            "at": now(),
-            "case_id": case.get("case_id"),
-            "signature": case.get("signature"),
-            "title": case.get("title"),
-            "node": node,
-            "status": status,
-            "message": message,
-            **data,
-        }
-        self.state["active_case_id"] = case.get("case_id")
-        self.state["active_signature"] = case.get("signature")
-        self.state["active_case_title"] = case.get("title")
-        self.state["active_node"] = node if status == "running" else self.state.get("active_node")
-        self.state.setdefault("node_events", []).append(item)
-        self.state["node_events"] = self.state["node_events"][-160:]
-        self.write()
+        with self.lock:
+            item = {
+                "at": now(),
+                "case_id": case.get("case_id"),
+                "signature": case.get("signature"),
+                "title": case.get("title"),
+                "node": node,
+                "status": status,
+                "message": message,
+                **data,
+            }
+            self.state["active_case_id"] = case.get("case_id")
+            self.state["active_signature"] = case.get("signature")
+            self.state["active_case_title"] = case.get("title")
+            self.state["active_node"] = node if status == "running" else self.state.get("active_node")
+            self.state.setdefault("node_events", []).append(item)
+            self.state["node_events"] = self.state["node_events"][-220:]
+            self.write()
         self.event("node", message, node=node, node_status=status, case_id=case.get("case_id"), signature=case.get("signature"), **data)
 
+    def api_delta(self, delta: int):
+        with self.lock:
+            self.state["active_api_calls"] = max(0, int(self.state.get("active_api_calls") or 0) + delta)
+            self.write()
+
+    def record_result(self, result: dict):
+        with self.lock:
+            self.state["results"].append(result)
+            self.state["cases_done"] = len(self.state["results"])
+            self.write()
+
+    def record_promotion(self, promotion: dict):
+        with self.lock:
+            self.state.setdefault("docx_promotions", []).append(promotion)
+            self.state["docx_promotions"] = self.state["docx_promotions"][-80:]
+            self.write()
+
     def finish(self, status: str, message: str):
-        self.state["status"] = status
-        self.state["finished_at"] = now()
-        self.write()
+        with self.lock:
+            self.state["status"] = status
+            self.state["finished_at"] = now()
+            self.write()
         self.event("finish", message, status=status)
 
 
@@ -277,7 +320,11 @@ def run_case(case: dict, log: RecheckLog, solution_id: str | None = None) -> dic
     log.event("case", f"Rechecking {case.get('title')}", case_id=case.get("case_id"), image_count=image_count)
     started = time.time()
     log.node(case, "focused-openai-leaf", "running", "Focused OpenAI vision leaf is re-reading the evidence images.", image_count=image_count)
-    response = create_response(model=MODEL, content=content, start_dir=log.run_dir / "llm-usage", reasoning_effort="low")
+    log.api_delta(1)
+    try:
+        response = create_response(model=MODEL, content=content, start_dir=log.run_dir / "llm-usage", reasoning_effort="low")
+    finally:
+        log.api_delta(-1)
     elapsed = round(time.time() - started, 2)
     log.node(case, "focused-openai-leaf", "complete", f"OpenAI replay response returned in {elapsed}s.", elapsed_seconds=elapsed, response_id=response.get("id"))
     text = response_text(response)
@@ -306,6 +353,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--solution-id", choices=sorted(SOLUTION_RULES), default=None)
     parser.add_argument("--case-key", default=None)
+    parser.add_argument("--case-keys-file", default=None)
+    parser.add_argument("--max-workers", type=int, default=1)
     args = parser.parse_args()
 
     run_dir = RECHECKS / args.recheck_id
@@ -319,15 +368,21 @@ def main() -> None:
     if args.case_key:
         cases = [case for case in cases if args.case_key in {str(case.get("case_id")), str(case.get("signature"))}]
         log.state["case_key"] = args.case_key
+    case_keys = read_case_keys(args.case_keys_file)
+    if case_keys:
+        cases = [case for case in cases if str(case.get("case_id")) in case_keys or str(case.get("signature")) in case_keys]
+        log.state["case_keys_file"] = args.case_keys_file
+        log.state["case_keys_total"] = len(case_keys)
     cases = cases[: args.limit]
     log.state["cases_total"] = len(cases)
+    log.state["max_workers"] = max(1, args.max_workers)
     log.write()
     try:
-        for case in cases:
+        def execute(case: dict) -> dict:
             try:
-                result = run_case(case, log, args.solution_id)
+                return run_case(case, log, args.solution_id)
             except Exception as exc:
-                result = {
+                return {
                     "case_id": case.get("case_id"),
                     "signature": case.get("signature"),
                     "title": case.get("title"),
@@ -337,17 +392,26 @@ def main() -> None:
                     "readings": [],
                     "agent_prompt_lessons": [],
                 }
-            log.state["results"].append(result)
-            log.state["cases_done"] = len(log.state["results"])
-            log.write()
+
+        def finish_result(result: dict) -> None:
+            log.record_result(result)
             promotion = promote_results([result], apply_docx=True)
-            log.state.setdefault("docx_promotions", []).append(promotion)
-            log.state["docx_promotions"] = log.state["docx_promotions"][-40:]
-            log.write()
+            log.record_promotion(promotion)
             promoted = promotion.get("candidate_count", 0)
             if promoted:
                 log.event("docx_promotion", f"Promoted {promoted} corrected value(s) into run data and final DOCX", promotion=promotion)
             log.event("case_complete", f"{result.get('status')}: {result.get('title')}", case_id=result.get("case_id"), status=result.get("status"))
+
+        workers = max(1, args.max_workers)
+        if workers == 1 or len(cases) <= 1:
+            for case in cases:
+                finish_result(execute(case))
+        else:
+            log.event("parallel", f"Running focused replay with {workers} concurrent leaf agents", max_workers=workers, cases=len(cases))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(execute, case) for case in cases]
+                for future in as_completed(futures):
+                    finish_result(future.result())
         (run_dir / "results.json").write_text(json.dumps(log.state["results"], indent=2) + "\n")
         log.finish("complete", "Focused regression recheck complete")
     except Exception as exc:

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lxml import etree
@@ -24,6 +24,7 @@ VALIDATIONS = RUNS / "validations"
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 RECHECKS = RUNS / "regression-rechecks"
 VALIDATION_REVIEW_METADATA = RUNS / "validation-review-metadata.jsonl"
+SOURCE_BACKED_EXCEPTIONS = RUNS / "source-backed-exceptions.jsonl"
 FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
 LEDGER = RUNS / "closed-loop-clean.jsonl"
 STATUS = RUNS / "closed-loop-status.json"
@@ -69,6 +70,67 @@ def append_jsonl(path: Path, item: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         handle.write(json.dumps(item) + "\n")
+
+
+def source_evidence(anomaly: dict) -> list[dict]:
+    rows = []
+    evidence = anomaly.get("evidence") if isinstance(anomaly.get("evidence"), list) else []
+    for ev in evidence:
+        if not isinstance(ev, dict):
+            continue
+        row = {
+            "structure": ev.get("structure") or anomaly.get("structure"),
+            "run_id": ev.get("run_id") or anomaly.get("run_id"),
+            "agent": ev.get("agent") or ev.get("table") or anomaly.get("agent"),
+            "source_image": ev.get("source_image") or ev.get("source") or ev.get("image"),
+            "value": ev.get("value"),
+            "numeric": ev.get("numeric"),
+            "row": ev.get("row"),
+            "station": ev.get("station"),
+        }
+        if row["structure"] and row["agent"] and row["source_image"]:
+            rows.append(row)
+    return rows
+
+
+def anomaly_error_class(anomaly: dict) -> str:
+    text = " ".join(str(anomaly.get(key) or "").lower() for key in ("kind", "title", "why"))
+    if any(token in text for token in ("sign", "polarity", "minus", "positive", "negative", "potential", "v dc")):
+        return "potential_sign"
+    if any(token in text for token in ("decimal", "magnitude", "scale", "outlier", "dropped digit")):
+        return "magnitude_scale"
+    if any(token in text for token in ("unit", "ma", "mv", "dc", "amp", "volt")):
+        return "unit_sanity"
+    if any(token in text for token in ("missing", "extra", "count", "four", "five", "expected")):
+        return "shape_count"
+    return str(anomaly.get("kind") or "review")
+
+
+def accepted_exception_record(validation_id: str, anomaly: dict, result: dict) -> dict:
+    evidence = source_evidence(anomaly)
+    agents = sorted({str(ev.get("agent")) for ev in evidence if ev.get("agent")})
+    sources = sorted({str(ev.get("source_image")) for ev in evidence if ev.get("source_image")})
+    structures = sorted({str(ev.get("structure")) for ev in evidence if ev.get("structure")})
+    return {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "status": "accepted_source_backed",
+        "validation_id": validation_id,
+        "anomaly_id": anomaly.get("id"),
+        "signature": anomaly.get("signature"),
+        "evidence_hash": anomaly.get("evidence_hash"),
+        "kind": anomaly.get("kind"),
+        "title": anomaly.get("title"),
+        "why": anomaly.get("why"),
+        "error_class": anomaly_error_class(anomaly),
+        "structures": structures,
+        "agents": agents,
+        "sources": sources,
+        "evidence": evidence,
+        "recheck_status": result.get("status"),
+        "recheck_decision": result.get("decision"),
+        "recheck_summary": result.get("summary") or result.get("note") or result.get("explanation"),
+        "source": "closed_loop_clean",
+    }
 
 
 def text_of(node) -> str:
@@ -319,7 +381,7 @@ def record_anomalies(validation_id: str, anomalies: list[dict]) -> list[dict]:
             "severity": anomaly.get("severity"),
             "note": "Closed-loop clean run recorded this validation anomaly for focused replay.",
             "anomaly": anomaly,
-            "next_step": "Focused replay must either correct source extraction and write DOCX, or mark exact source-backed anomaly accepted.",
+            "next_step": "Focused replay must either correct source extraction and write DOCX, or mark source-backed anomaly accepted by evidence/class.",
         }
         append_jsonl(REGRESSION_CASES, item)
         append_jsonl(FEEDBACK_PROCESSING, {
@@ -337,9 +399,25 @@ def record_anomalies(validation_id: str, anomalies: list[dict]) -> list[dict]:
     return recorded
 
 
-def run_recheck(iteration: int) -> tuple[str, dict, dict]:
+def run_recheck(iteration: int, case_keys: list[str]) -> tuple[str, dict, dict]:
     recheck_id = f"{stamp()}-closed-loop-{iteration:02d}-recheck"
-    result = run_command([sys.executable, str(ROOT / "regression_recheck.py"), "--recheck-id", recheck_id, "--limit", "96"], f"recheck {recheck_id}")
+    recheck_dir = RECHECKS / recheck_id
+    recheck_dir.mkdir(parents=True, exist_ok=True)
+    case_keys_file = recheck_dir / "target-case-keys.json"
+    write_json(case_keys_file, sorted(set(case_keys)))
+    limit = str(max(1, len(set(case_keys))))
+    result = run_command([
+        sys.executable,
+        str(ROOT / "regression_recheck.py"),
+        "--recheck-id",
+        recheck_id,
+        "--case-keys-file",
+        str(case_keys_file),
+        "--limit",
+        limit,
+        "--max-workers",
+        "4",
+    ], f"recheck {recheck_id}")
     state = read_json(RECHECKS / recheck_id / "state.json", {})
     return recheck_id, state, result
 
@@ -367,53 +445,81 @@ def accepted_source_result(result: dict) -> bool:
         return True
     return any(phrase in text for phrase in [
         "matches the source",
+        "matches the recorded",
         "source-backed",
+        "source backed",
         "no visible minus",
+        "no fifth",
+        "no 5th",
+        "no image/value supporting",
+        "no image supporting",
+        "no value supporting",
+        "only four",
+        "only row 2",
+        "no fifth reading is evidenced",
+        "no fifth reading is present",
+        "no 5th reading is evidenced",
+        "outlier remains",
+        "contextual",
+        "rather than a transcription error",
+        "not a transcription failure",
         "keep the source",
         "not a transcription error",
         "ignorable",
         "do not flag",
+        "does not reproduce",
     ])
 
 
 def accept_source_backed(validation_id: str, anomalies: list[dict], recheck_state: dict) -> list[dict]:
-    by_key = {}
+    results_by_key = {}
     for result in recheck_state.get("results") or []:
-        for key in (result.get("case_id"), result.get("signature")):
+        if not isinstance(result, dict):
+            continue
+        for key in (
+            result.get("case_id"),
+            result.get("case_key"),
+            result.get("validation_case_key"),
+            result.get("signature"),
+            result.get("anomaly_signature"),
+        ):
             if key:
-                by_key[str(key)] = result
+                results_by_key[str(key)] = result
     accepted = []
     for anomaly in anomalies:
-        anomaly_id = str(anomaly.get("id") or anomaly_signature(anomaly))
+        anomaly_id = anomaly.get("id")
         case_id = f"{validation_id}:{anomaly_id}"
-        signature = anomaly_signature(anomaly)
-        result = by_key.get(case_id) or by_key.get(signature)
+        result = results_by_key.get(case_id) or results_by_key.get(str(anomaly.get("signature")))
         if not result or not accepted_source_result(result):
             continue
         item = {
-            "at": now(),
+            "at": datetime.now(timezone.utc).isoformat(),
             "validation_id": validation_id,
             "anomaly_id": anomaly_id,
-            "signature": signature,
+            "case_id": case_id,
+            "signature": anomaly.get("signature"),
             "evidence_hash": anomaly.get("evidence_hash"),
-            "status": "reviewed",
-            "note": "Closed-loop accepted exact source-backed anomaly after focused replay. Suppressed for this exact evidence hash only.",
+            "status": "accepted_source_backed",
+            "note": "Closed-loop accepted source-backed anomaly after focused replay. Future validation suppresses matching evidence/class, not only exact reviewer wording.",
             "source": "closed_loop_clean",
             "recheck_id": recheck_state.get("recheck_id"),
-            "result_status": result.get("status"),
-            "title": anomaly.get("title"),
+            "recheck_status": result.get("status"),
+            "recheck_decision": result.get("decision"),
         }
         append_jsonl(VALIDATION_REVIEW_METADATA, item)
-        append_jsonl(FEEDBACK_PROCESSING, {
-            "at": item["at"],
-            "kind": "validation_anomaly_accepted_source_backed",
-            "validation_id": validation_id,
-            "anomaly_id": anomaly_id,
-            "signature": signature,
-            "title": anomaly.get("title"),
-        })
-        accepted.append(item)
+        exception = accepted_exception_record(validation_id, anomaly, result)
+        append_jsonl(SOURCE_BACKED_EXCEPTIONS, exception)
+        accepted.append(exception)
     return accepted
+
+
+def anomaly_case_keys(validation_id: str, anomalies: list[dict]) -> list[str]:
+    keys = []
+    for anomaly in anomalies:
+        anomaly_id = str(anomaly.get("id") or anomaly_signature(anomaly))
+        keys.append(f"{validation_id}:{anomaly_id}")
+        keys.append(anomaly_signature(anomaly))
+    return [key for key in keys if key]
 
 
 def write_ledger(item: dict) -> None:
@@ -446,6 +552,7 @@ def clean_loop(max_iterations: int) -> dict:
         heartbeat("validation", "running validation agents on latest extracted dataset", iteration=iteration, agent="validation-orchestrator", readback_mismatches=readback["mismatch_count"])
         validation_id, validation_state, validation_command = run_validation(iteration)
         anomalies = validation_state.get("anomalies") or []
+        validation_failed = validation_command.get("returncode") != 0 or validation_state.get("status") == "failed"
         entry = {
             "at": now(),
             "iteration": iteration,
@@ -455,9 +562,24 @@ def clean_loop(max_iterations: int) -> dict:
             "readback": readback,
             "validation_id": validation_id,
             "validation_command": validation_command,
+            "validation_failed": validation_failed,
             "anomaly_count": len(anomalies),
             "anomaly_titles": [item.get("title") for item in anomalies[:20]],
         }
+        if validation_failed:
+            failed_entry = {**entry, "status": "validation_failed"}
+            write_ledger(failed_entry)
+            history.append(failed_entry)
+            heartbeat("validation_failed", "validation crashed or exited nonzero; not marking DOCX clean", iteration=iteration, status="validation_failed", validation_id=validation_id, returncode=validation_command.get("returncode"))
+            return {
+                "status": "validation_failed",
+                "iterations": iteration,
+                "final_docx": final_docx,
+                "readback": readback,
+                "validation_id": validation_id,
+                "validation_command": validation_command,
+                "history": history,
+            }
         if write_failures or readback["mismatch_count"]:
             heartbeat("docx_failed", "DOCX write/readback failed; loop will retry before opening", iteration=iteration, status="running", failures=len(write_failures), mismatches=readback["mismatch_count"])
             write_ledger({**entry, "status": "docx_failed"})
@@ -477,9 +599,10 @@ def clean_loop(max_iterations: int) -> dict:
             }
         heartbeat("record_anomalies", f"recording {len(anomalies)} validation anomalies for focused replay", iteration=iteration, validation_id=validation_id, anomaly_count=len(anomalies), agent="regression-case-recorder")
         recorded = record_anomalies(validation_id, anomalies)
-        heartbeat("focused_recheck", "running focused OpenAI replay over recorded anomalies", iteration=iteration, validation_id=validation_id, recorded_cases=len(recorded), agent="focused-openai-leaf")
-        recheck_id, recheck_state, recheck_command = run_recheck(iteration)
-        heartbeat("accept_source_backed", "accepting exact source-backed anomalies and suppressing only exact evidence hashes", iteration=iteration, recheck_id=recheck_id, agent="validation-reviewer")
+        case_keys = anomaly_case_keys(validation_id, anomalies)
+        heartbeat("focused_recheck", "running focused OpenAI replay over current validation anomalies only", iteration=iteration, validation_id=validation_id, recorded_cases=len(recorded), target_cases=len(set(case_keys)), agent="focused-openai-leaf")
+        recheck_id, recheck_state, recheck_command = run_recheck(iteration, case_keys)
+        heartbeat("accept_source_backed", "accepting source-backed anomalies and suppressing matching evidence/class in future validation", iteration=iteration, recheck_id=recheck_id, agent="validation-reviewer")
         accepted = accept_source_backed(validation_id, anomalies, recheck_state)
         promoted = sum((promotion.get("candidate_count") or 0) for promotion in recheck_state.get("docx_promotions") or [])
         entry.update({

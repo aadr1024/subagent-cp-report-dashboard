@@ -1088,6 +1088,7 @@ function activityFeed() {
         active_step: runningAgent?.name || "validation",
         active_agent: runningAgent?.name || "validation-orchestrator",
         updated_at: state.updated_at || state.started_at || null,
+        active_api_calls: runningAgent?.name === "llm-reviewer" ? 1 : 0,
         api_calls: 0,
         artifacts: state.anomalies?.length || 0,
       });
@@ -1121,6 +1122,7 @@ function activityFeed() {
         active_step: state.active_node || "focused replay",
         active_agent: state.active_node || "focused-openai-leaf",
         updated_at: state.updated_at || state.started_at || null,
+        active_api_calls: Number(state.active_api_calls || 0),
         api_calls: state.cases_done || 0,
         artifacts: state.cases_total || 0,
       });
@@ -1192,10 +1194,36 @@ function activityFeed() {
   }
   return {
     active_runs,
+    concurrency: activityConcurrency(active_runs),
     events: events
       .sort((a, b) => (Date.parse(b.at || "") || 0) - (Date.parse(a.at || "") || 0) || Number(b.seq || 0) - Number(a.seq || 0))
       .slice(0, 80),
   };
+}
+
+function activityConcurrency(activeRuns) {
+  const counters = {
+    total_active: activeRuns.length,
+    api_calls_active: 0,
+    docx_writes_active: 0,
+    validations_active: 0,
+    rechecks_active: 0,
+    cleanup_active: 0,
+    str_runs_active: 0,
+  };
+  for (const item of activeRuns) {
+    const structure = String(item.structure || "");
+    const step = String(item.active_step || item.active_agent || "").toLowerCase();
+    if (structure === "validation") counters.validations_active += 1;
+    else if (structure === "recheck") counters.rechecks_active += 1;
+    else if (structure === "closed-loop") counters.cleanup_active += 1;
+    else counters.str_runs_active += 1;
+    const activeApi = Number(item.active_api_calls || 0);
+    if (activeApi > 0) counters.api_calls_active += activeApi;
+    else if (structure !== "closed-loop" && (step.includes("openai") || step.includes("llm") || step.includes("focused") || step.includes("reviewer"))) counters.api_calls_active += 1;
+    if (step.includes("docx") || step.includes("write")) counters.docx_writes_active += 1;
+  }
+  return counters;
 }
 
 function controlProcessAlive(dir, updatedAt = null) {
