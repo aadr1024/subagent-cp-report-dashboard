@@ -297,7 +297,7 @@ function readingKind(agentKey, readings) {
   if (agentKey === "table5-currents") return "current";
   if (agentKey === "table6-potentials") return "potential";
   if (agentKey === "table4-stations") {
-    const names = [...new Set(readings.map((reading) => reading.row_name || reading.annotation_label || "").filter(Boolean).map((value) => String(value).replace(/^table\s*4\s*/i, "").replace(/[_-]+/g, " ").trim()).filter(Boolean))];
+    const names = [...new Set(readings.map((reading) => reading.row_name || reading.annotation_label || reading.row || "").filter(Boolean).map((value) => String(value).replace(/^table\s*4\s*/i, "").replace(/[_-]+/g, " ").trim()).filter(Boolean))];
     const compact = names.filter((name) => !/^table\s*4$/i.test(name)).slice(0, 2);
     return compact.length ? compact.join(" + ") : "current + shunt";
   }
@@ -821,10 +821,10 @@ function renderValidation(validation) {
   <div class="validation-agents">${Object.values(latest.agents || {}).map((agent) => `<div class="validation-agent ${cls(agent.status)}">
     ${statusDot(agent.status)}<strong>${escapeHtml(agent.name || "")}</strong><span>${escapeHtml(agent.message || "")}</span>
   </div>`).join("")}</div>
-  <div class="validation-list">${rows.length ? rows.map((item) => renderAnomalyCard(latest.validation_id, item)).join("") : `<div class="message">No anomaly cards yet. If the validation is running, cards will appear when the reviewer finishes.</div>`}</div>`;
+  <div class="validation-list">${rows.length ? rows.map((item) => renderAnomalyCard(latest.validation_id, item, latest.context_groups || [])).join("") : `<div class="message">No anomaly cards yet. If the validation is running, cards will appear when the reviewer finishes.</div>`}</div>`;
 }
 
-function renderAnomalyCard(validationId, item) {
+function renderAnomalyCard(validationId, item, contextGroups = []) {
   const evidence = item.evidence || [];
   return `<article class="anomaly-card ${escapeHtml(item.severity || "medium")}" data-anomaly-id="${escapeHtml(item.id || "")}">
     <div class="anomaly-head">
@@ -838,25 +838,76 @@ function renderAnomalyCard(validationId, item) {
         <mark>conf ${Math.round(Number(item.confidence || 0) * 100)}%</mark>
       </div>
     </div>
-    <div class="anomaly-evidence">${evidence.map(renderAnomalyEvidence).join("")}</div>
+    <div class="anomaly-evidence">${evidence.map((evidenceItem) => renderAnomalyEvidence(evidenceItem, evidence, contextGroups)).join("")}</div>
     <div class="anomaly-actions">
       <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(item.saved_note?.note || "")}" />
       <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved" : "Save"}</button>
       <button class="small-btn mark-reviewed" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Mark reviewed</button>
+      <small class="anomaly-route">Saved here as validation metadata. It does not edit the DOCX; run-board value feedback is stored separately for future agent prompts.</small>
     </div>
   </article>`;
 }
 
-function renderAnomalyEvidence(item) {
+function anomalyContextGroups(evidence) {
+  const groups = new Map();
+  for (const item of evidence || []) {
+    if (!item.source_image) continue;
+    const agent = item.agent || "";
+    const fallbackWord = agent === "table4-stations" ? "Station" : "Anode";
+    const station = normalizedStationLabel(item.station, fallbackWord, true) || normalizedStationLabel(item.row, fallbackWord, false);
+    const kind = readingKind(agent, [{
+      row: item.row,
+      row_name: item.row,
+      annotation_label: item.row,
+      station: item.station,
+      test_station: item.station,
+      mg: item.station,
+    }]);
+    const parts = [tableDisplayName(agent), station, kind].filter(Boolean);
+    const title = parts.filter((part, index) => parts.findIndex((candidate) => candidate.toLowerCase() === part.toLowerCase()) === index).join(" · ");
+    const key = `${agent}:${station}:${kind}`;
+    if (!groups.has(key)) groups.set(key, { agent, title: title || agent || "evidence group", sources: [] });
+    const group = groups.get(key);
+    if (!group.sources.includes(item.source_image)) group.sources.push(item.source_image);
+  }
+  return [...groups.values()];
+}
+
+function renderAnomalyEvidence(item, allEvidence = [], validationContextGroups = []) {
   const folder = knownStructures.find((entry) => String(entry.structure) === String(item.structure))?.folder || "";
   const image = item.source_image || "";
   const href = folder && image ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(image)}?size=760` : "";
+  const neighborhood = folder && image
+    ? `/api/image-neighborhood?folder=${encodeURIComponent(folder)}&image=${encodeURIComponent(image)}&limit=21`
+    : "";
+  const mergedGroups = [
+    ...validationContextGroups.filter((group) => String(group.structure) === String(item.structure)),
+    ...anomalyContextGroups(allEvidence),
+  ];
+  const seenGroups = new Set();
+  const contextGroups = mergedGroups.filter((group) => {
+    const key = `${group.agent}:${group.title}:${(group.sources || []).join(",")}`;
+    if (seenGroups.has(key)) return false;
+    seenGroups.add(key);
+    return true;
+  }).map((group) => ({
+    ...group,
+    current: group.sources.includes(image),
+  }));
   return `<div class="anomaly-chip">
     <strong>STR ${escapeHtml(item.structure || "?")}</strong>
     <span>${escapeHtml(item.agent || "")}</span>
     <mark>${escapeHtml(item.value ?? "")}</mark>
     ${image ? `<small>${escapeHtml(image)}</small>` : ""}
-    ${href ? `<div class="anomaly-hover"><img src="${href}" alt="${escapeHtml(image)}" loading="lazy" decoding="async" /></div>` : ""}
+    ${href ? `<div class="hover-preview anomaly-preview" data-neighborhood="${escapeHtml(neighborhood)}">
+      <div class="hover-current">
+        <img data-src="${href}" alt="${escapeHtml(image)}" decoding="async" fetchpriority="low" />
+        <div>STR ${escapeHtml(item.structure || "?")} · ${escapeHtml(item.agent || "")} · ${escapeHtml(item.value ?? "")}</div>
+      </div>
+      <div class="neighbor-strip" data-context-groups="${escapeHtml(JSON.stringify(contextGroups))}">
+        <div class="neighbor-loading">hover: loading validation image context</div>
+      </div>
+    </div>` : ""}
   </div>`;
 }
 
@@ -1359,9 +1410,10 @@ async function hydrateHoverPreview(preview) {
 
 document.addEventListener("mouseover", async (event) => {
   const chip = event.target.closest(".reading-chip");
-  const preview = chip ? chip.querySelector(".hover-preview") : event.target.closest(".hover-preview");
+  const anomalyChip = event.target.closest(".anomaly-chip");
+  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? anomalyChip.querySelector(".hover-preview") : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
-  if (leaf || chip || preview) deferRenderUntil = Date.now() + 1800;
+  if (leaf || chip || preview || anomalyChip) deferRenderUntil = Date.now() + 1800;
   hydrateHoverPreview(preview);
 });
 loadStructures();

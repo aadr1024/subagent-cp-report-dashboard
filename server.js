@@ -204,6 +204,62 @@ function validationDirs() {
     .sort((a, b) => String(path.basename(b)).localeCompare(String(path.basename(a))));
 }
 
+function validationTableName(agent) {
+  if (agent === "table4-stations") return "Table 4";
+  if (agent === "table5-currents") return "Table 5";
+  if (agent === "table6-potentials") return "Table 6";
+  if (String(agent || "").startsWith("table3-")) return `Table 3 ${String(agent).replace("table3-", "")}`;
+  return agent || "Evidence";
+}
+
+function validationGroupLabel(value, fallbackWord) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  let match = text.match(/(?:test\s*)?station\s*#?\s*(\d+)/i) || text.match(/\bts\s*#?\s*(\d+)/i);
+  if (match) return `${fallbackWord} ${match[1]}`;
+  match = text.match(/\b(?:anode|mg)\s*#?\s*(\d+)/i);
+  if (match) return `Anode ${match[1]}`;
+  match = text.match(/^#?\s*(\d+)$/);
+  if (match) return `${fallbackWord} ${match[1]}`;
+  return "";
+}
+
+function validationKind(agent, records) {
+  if (agent === "table5-currents") return "current";
+  if (agent === "table6-potentials") return "potential";
+  if (agent === "table4-stations") {
+    const names = [...new Set(records.map((record) => record.row || "").filter(Boolean).map((value) => String(value).replace(/^table\s*4\s*/i, "").replace(/[_-]+/g, " ").trim()).filter(Boolean))];
+    return names.slice(0, 2).join(" + ") || "current + shunt";
+  }
+  return "";
+}
+
+function validationContextGroups(dir) {
+  const records = readJsonFile(path.join(dir, "dataset.json"), []);
+  const buckets = new Map();
+  for (const record of records) {
+    if (!record.source_image) continue;
+    const fallbackWord = record.agent === "table4-stations" ? "Station" : "Anode";
+    const station = validationGroupLabel(record.station, fallbackWord) || validationGroupLabel(record.row, fallbackWord);
+    const key = `${record.structure}:${record.agent}:${station || "local"}:${record.row || ""}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(record);
+  }
+  return [...buckets.values()].map((records) => {
+    const first = records[0] || {};
+    const fallbackWord = first.agent === "table4-stations" ? "Station" : "Anode";
+    const station = validationGroupLabel(first.station, fallbackWord) || validationGroupLabel(first.row, fallbackWord);
+    const kind = validationKind(first.agent, records);
+    const parts = [validationTableName(first.agent), station, kind].filter(Boolean);
+    return {
+      structure: first.structure,
+      agent: first.agent,
+      title: parts.filter((part, index) => parts.findIndex((candidate) => candidate.toLowerCase() === part.toLowerCase()) === index).join(" · "),
+      sources: [...new Set(records.map((record) => record.source_image).filter(Boolean))],
+    };
+  }).filter((group) => group.sources.length);
+}
+
 function validationState(dir) {
   const state = readJsonFile(path.join(dir, "state.json"), {});
   const notes = readJsonLines(path.join(dir, "notes.jsonl"));
@@ -214,6 +270,7 @@ function validationState(dir) {
   }, {});
   state.notes = notes;
   state.events = events.slice(-160);
+  state.context_groups = validationContextGroups(dir);
   state.anomalies = (state.anomalies || []).map((item) => ({ ...item, saved_note: noteMap[item.id] || null }));
   return state;
 }

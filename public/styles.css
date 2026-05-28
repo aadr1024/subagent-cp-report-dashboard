@@ -1685,6 +1685,18 @@ main {
   display: block;
 }
 
+.anomaly-chip .hover-preview {
+  left: 0;
+  top: calc(100% + 8px);
+  width: min(1360px, calc(100vw - 100px));
+  text-align: left;
+}
+
+.anomaly-chip:hover .hover-preview,
+.anomaly-chip:focus-within .hover-preview {
+  display: block;
+}
+
 .anomaly-actions {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto auto;
@@ -1696,6 +1708,12 @@ main {
   height: 32px;
   border-radius: 999px;
   font-size: 12px;
+}
+
+.anomaly-route {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .launcher-table {
