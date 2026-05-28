@@ -17,6 +17,38 @@ const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
 const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
+const SOLUTION_DEFINITIONS = {
+  "potential-minus-sign-discipline": {
+    title: "Potential sign discipline",
+    problem: "Potential readings can lose a faint LCD minus sign or get treated as positive when nearby CP readings are normally negative.",
+    solution: "Extraction leaves must preserve visible minus signs, bias Table 3/Table 6 potentials negative when the local evidence supports it, and surface truly positive/no-minus readings as polarity anomalies instead of silently forcing them.",
+    detection_rule: "Applies to Table 3/Table 6, V DC, minus/negative/positive/polarity notes, and sign-mixed potential evidence.",
+  },
+  "table4-current-decimal-scale": {
+    title: "Table 4 current decimal scale",
+    problem: "LCD current values can be read as large un-decimaled integers, for example 6369 instead of 63.69 mA.",
+    solution: "Table 4 leaves must read current displays as mA, inspect decimal points carefully, and compare magnitude against same-station shunt/current peers before accepting large integer-like values.",
+    detection_rule: "Applies to Table 4 current/shunt readings, mA/mV units, and suspicious large values such as 6369, 4386, or 345.7.",
+  },
+  "table3-five-reading-completeness": {
+    title: "Table 3 five-reading completeness",
+    problem: "A Table 3 directional row can be accepted with only four values when the report expects five positions.",
+    solution: "Shape validators and extraction leaves must require five Table 3 directional readings unless source evidence proves a value is missing, then keep the row flagged for review.",
+    detection_rule: "Applies to Table 3 row-count, missing-value, and four-vs-five evidence anomalies.",
+  },
+  "station-pairing-coverage": {
+    title: "Station/anode pairing coverage",
+    problem: "Table 5 current and Table 6 potential groups can be paired to the wrong station/anode or lose coverage when images are close together.",
+    solution: "Leaf nodes must group values by image proximity plus station/anode labels, then validate Table 5 and Table 6 coverage together before DOCX write.",
+    detection_rule: "Applies to station/anode/MG coverage, Table 5/Table 6 pairing, and local image group boundary issues.",
+  },
+  "general-anomaly-review": {
+    title: "General anomaly review loop",
+    problem: "A reviewed anomaly does not yet match a more specific reusable error class.",
+    solution: "Keep the exact evidence bundle replayable, ask the focused reviewer to extract lessons, and promote it into a narrower solution class once a pattern repeats.",
+    detection_rule: "Fallback for recorded cases that do not match the current specific solution classes.",
+  },
+};
 
 fs.mkdirSync(RUNS, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
@@ -373,6 +405,186 @@ function regressionCases() {
   return [...latestBySignature.values()].reverse();
 }
 
+function solutionText(item, result = {}) {
+  const evidence = item.anomaly?.evidence || [];
+  return [
+    item.title,
+    item.kind,
+    item.severity,
+    item.note,
+    item.next_step,
+    result.summary,
+    ...(result.agent_prompt_lessons || []),
+    ...evidence.flatMap((entry) => [entry.agent, entry.row, entry.station, entry.value, entry.source_image]),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function solutionIdForCase(item, result = {}) {
+  const text = solutionText(item, result);
+  if (/\btable\s*4\b|table4|shunt|\bma\b|\bmv\b|current|6369|4386|345\.7|decimal/.test(text)
+    && /current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7/.test(text)) {
+    return "table4-current-decimal-scale";
+  }
+  if ((/\btable\s*3\b|table3/.test(text)) && /(five|5\s+values|expected\s+five|expected\s+5|only\s+four|4\s+data|missing|count)/.test(text)) {
+    return "table3-five-reading-completeness";
+  }
+  if (/(station|anode|\bmg\b|pair|coverage|group)/.test(text) && /(\btable\s*5\b|table5|\btable\s*6\b|table6|potential|current)/.test(text)) {
+    return "station-pairing-coverage";
+  }
+  if (/(minus|negative|positive|polarity|sign|potential|\bv\s*dc\b|\btable\s*3\b|table3|\btable\s*6\b|table6)/.test(text)) {
+    return "potential-minus-sign-discipline";
+  }
+  return "general-anomaly-review";
+}
+
+function resultValueChanged(reading) {
+  const oldValue = String(reading?.old_value ?? "").trim();
+  const newValue = String(reading?.rechecked_value ?? "").trim();
+  return Boolean(oldValue && newValue && oldValue !== newValue);
+}
+
+function solutionOutcome(result) {
+  if (!result) return "not-run";
+  const status = String(result.status || "").toLowerCase();
+  const readings = Array.isArray(result.readings) ? result.readings : [];
+  const changed = readings.some(resultValueChanged);
+  const stillFlags = result.case_still_flags === true || readings.some((reading) => reading.issue_present === true);
+  if (status === "fixed") return "solved";
+  if (changed && status !== "needs_review" && !stillFlags) return "corrected";
+  if (changed && status !== "needs_review") return "source-corrected";
+  if (status === "needs_review") return "needs-review";
+  if (status === "reproduced") return "still-reproduces";
+  return status || "not-run";
+}
+
+function solutionOutcomeCounts(cases) {
+  return cases.reduce((counts, item) => {
+    const outcome = item.outcome || "not-run";
+    counts.total += 1;
+    if (["solved", "corrected", "source-corrected"].includes(outcome)) counts.solved += 1;
+    else if (outcome === "needs-review") counts.needs_review += 1;
+    else if (outcome === "not-run") counts.not_run += 1;
+    else counts.open += 1;
+    return counts;
+  }, { total: 0, solved: 0, open: 0, needs_review: 0, not_run: 0 });
+}
+
+function latestRecheckResultsByCase() {
+  const results = new Map();
+  const dirs = fs.readdirSync(REGRESSION_RECHECKS, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(REGRESSION_RECHECKS, entry.name))
+    .sort((a, b) => String(path.basename(a)).localeCompare(String(path.basename(b))));
+  for (const dir of dirs) {
+    const state = readJsonFile(path.join(dir, "state.json"), {});
+    const items = Array.isArray(state.results) && state.results.length
+      ? state.results
+      : readJsonFile(path.join(dir, "results.json"), []);
+    for (const result of items || []) {
+      const key = result.signature || result.case_id;
+      if (!key) continue;
+      results.set(key, { ...result, recheck_id: path.basename(dir), recheck_status: state.status || "unknown" });
+    }
+  }
+  return results;
+}
+
+function evidenceSummary(item) {
+  const evidence = item.anomaly?.evidence || [];
+  const structures = [...new Set(evidence.map((entry) => entry.structure).filter(Boolean))];
+  const agents = [...new Set(evidence.map((entry) => entry.agent).filter(Boolean))];
+  return {
+    structures,
+    agents,
+    images: evidence.map((entry) => entry.source_image).filter(Boolean).slice(0, 8),
+    values: evidence.map((entry) => entry.value).filter((value) => value !== undefined && value !== null).slice(0, 8),
+  };
+}
+
+function regressionSolutions() {
+  const cases = regressionCases().slice().reverse();
+  const resultByCase = latestRecheckResultsByCase();
+  const groups = new Map();
+  for (const item of cases) {
+    const key = item.signature || item.case_id;
+    const result = resultByCase.get(key);
+    const solutionId = solutionIdForCase(item, result);
+    const definition = SOLUTION_DEFINITIONS[solutionId] || SOLUTION_DEFINITIONS["general-anomaly-review"];
+    if (!groups.has(solutionId)) {
+      groups.set(solutionId, {
+        solution_id: solutionId,
+        ...definition,
+        status: "not-run",
+        cases: [],
+        lessons: [],
+        agent_graph: [
+          "validation-reviewer captures anomaly from extracted leaf values",
+          "regression-case recorder freezes source images, old values, and reviewer note",
+          "focused-recheck leaf reopens exact evidence through OpenAI vision",
+          "solution lessons feed future extraction/validation leaf prompts",
+          "replay verifies whether this error class is now solved across recorded examples",
+        ],
+      });
+    }
+    const group = groups.get(solutionId);
+    const outcome = solutionOutcome(result);
+    const lessons = (result?.agent_prompt_lessons || []).filter(Boolean);
+    for (const lesson of lessons) {
+      if (!group.lessons.includes(lesson)) group.lessons.push(lesson);
+    }
+    group.cases.push({
+      case_id: item.case_id,
+      signature: item.signature,
+      title: item.title,
+      kind: item.kind,
+      severity: item.severity,
+      note: item.note || "",
+      status: item.status || "recorded",
+      outcome,
+      evidence: evidenceSummary(item),
+      result: result ? {
+        recheck_id: result.recheck_id,
+        status: result.status,
+        summary: result.summary,
+        case_still_flags: result.case_still_flags,
+        readings: (result.readings || []).slice(0, 10),
+      } : null,
+    });
+  }
+  const solutions = [...groups.values()].map((group) => {
+    const counts = solutionOutcomeCounts(group.cases);
+    const latestResult = group.cases.map((item) => item.result).filter(Boolean).sort((a, b) => String(b.recheck_id).localeCompare(String(a.recheck_id)))[0] || null;
+    const status = counts.total && counts.solved === counts.total ? "solved"
+      : counts.open || counts.needs_review ? "open"
+      : counts.solved ? "partial"
+      : "not-run";
+    return {
+      ...group,
+      status,
+      counts,
+      latest_recheck_id: latestResult?.recheck_id || null,
+      cases: group.cases.sort((a, b) => String(a.title || "").localeCompare(String(b.title || ""))),
+      lessons: group.lessons.slice(0, 12),
+    };
+  }).sort((a, b) => {
+    const rank = { open: 0, partial: 1, "not-run": 2, solved: 3 };
+    return (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || b.counts.total - a.counts.total;
+  });
+  return {
+    updated_at: new Date().toISOString(),
+    solutions,
+    totals: solutions.reduce((acc, solution) => {
+      acc.solutions += 1;
+      acc.cases += solution.counts.total;
+      acc.solved += solution.counts.solved;
+      acc.open += solution.counts.open;
+      acc.needs_review += solution.counts.needs_review;
+      acc.not_run += solution.counts.not_run;
+      return acc;
+    }, { solutions: 0, cases: 0, solved: 0, open: 0, needs_review: 0, not_run: 0 }),
+  };
+}
+
 function regressionRechecks() {
   const dirs = fs.readdirSync(REGRESSION_RECHECKS, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -398,27 +610,30 @@ function regressionRechecks() {
   };
 }
 
-function startRegressionRecheck(req, res) {
+function startRegressionRecheck(req, res, url) {
   const python = process.env.PYTHON || "python3";
+  const solutionId = String(url.searchParams.get("solution") || "").replace(/[^a-zA-Z0-9_.-]/g, "");
   const recheckId = `${stamp()}-regression-recheck`;
   const dir = path.join(REGRESSION_RECHECKS, recheckId);
   fs.mkdirSync(dir, { recursive: true });
   const env = { ...process.env };
   env.PYTHONPATH = SBA_SRC + (env.PYTHONPATH ? `:${env.PYTHONPATH}` : "");
-  const child = spawn(python, [path.join(ROOT, "regression_recheck.py"), "--recheck-id", recheckId], {
+  const args = [path.join(ROOT, "regression_recheck.py"), "--recheck-id", recheckId];
+  if (solutionId) args.push("--solution-id", solutionId, "--limit", "32");
+  const child = spawn(python, args, {
     cwd: ROOT,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const log = path.join(REGRESSION_RECHECKS, "recheck-spawn.log");
-  fs.appendFileSync(log, `\n[start] pid=${child.pid} recheck=${recheckId} at=${new Date().toISOString()}\n`);
+  fs.appendFileSync(log, `\n[start] pid=${child.pid} recheck=${recheckId} solution=${solutionId || "all"} at=${new Date().toISOString()}\n`);
   child.stdout.on("data", (chunk) => fs.appendFileSync(log, chunk));
   child.stderr.on("data", (chunk) => fs.appendFileSync(log, chunk));
-  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, recheck_id: recheckId, started_at: new Date().toISOString() }, null, 2) + "\n");
+  fs.writeFileSync(path.join(dir, "server-control.json"), JSON.stringify({ pid: child.pid, recheck_id: recheckId, solution_id: solutionId || null, started_at: new Date().toISOString() }, null, 2) + "\n");
   child.on("exit", (code, signal) => {
     fs.appendFileSync(log, `[exit] pid=${child.pid} code=${code} signal=${signal}\n`);
   });
-  json(res, 202, { ok: true, recheck_id: recheckId, pid: child.pid });
+  json(res, 202, { ok: true, recheck_id: recheckId, solution_id: solutionId || null, pid: child.pid });
 }
 
 function noteLooksLikeErrorCase(note) {
@@ -949,8 +1164,9 @@ async function api(req, res, url) {
   if (url.pathname === "/api/validation/save") return saveValidationNote(req, res);
   if (url.pathname === "/api/regression/record") return recordRegressionCase(req, res);
   if (url.pathname === "/api/regression") return json(res, 200, { updated_at: new Date().toISOString(), cases: regressionCases() });
+  if (url.pathname === "/api/regression/solutions") return json(res, 200, regressionSolutions());
   if (url.pathname === "/api/regression/rechecks") return json(res, 200, { updated_at: new Date().toISOString(), ...regressionRechecks() });
-  if (url.pathname === "/api/regression/recheck/start") return startRegressionRecheck(req, res);
+  if (url.pathname === "/api/regression/recheck/start") return startRegressionRecheck(req, res, url);
   if (url.pathname === "/api/feedback/status") return json(res, 200, feedbackStatus());
   if (url.pathname === "/api/structures") return json(res, 200, { structures: listStructures() });
   if (url.pathname === "/api/image-neighborhood") return imageNeighborhood(req, res, url);

@@ -20,6 +20,28 @@ SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 RECHECKS = RUNS / "regression-rechecks"
 MODEL = "gpt-5.2"
+SOLUTION_RULES = {
+    "potential-minus-sign-discipline": {
+        "title": "Potential sign discipline",
+        "prompt": "This replay targets sign discipline: preserve faint LCD minus signs, default Table 3/Table 6 potentials negative when local evidence supports it, and leave true positive/no-minus source readings positive while flagging polarity.",
+    },
+    "table4-current-decimal-scale": {
+        "title": "Table 4 current decimal scale",
+        "prompt": "This replay targets Table 4 current scale: inspect decimal points carefully, read current as mA, and compare suspicious large integer-like values against current/shunt peers.",
+    },
+    "table3-five-reading-completeness": {
+        "title": "Table 3 five-reading completeness",
+        "prompt": "This replay targets Table 3 completeness: directional rows usually require five readings unless source evidence proves a missing value.",
+    },
+    "station-pairing-coverage": {
+        "title": "Station/anode pairing coverage",
+        "prompt": "This replay targets station/anode pairing: group local image runs by station/anode labels plus image proximity before comparing Table 5 and Table 6 coverage.",
+    },
+    "general-anomaly-review": {
+        "title": "General anomaly review loop",
+        "prompt": "This replay targets a general reviewed anomaly that has not yet been promoted into a narrower class.",
+    },
+}
 
 
 def now() -> str:
@@ -118,9 +140,42 @@ def latest_cases() -> list[dict]:
     return list(by_signature.values())
 
 
-def prompt_for_case(case: dict) -> str:
+def solution_text(case: dict) -> str:
+    evidence = case.get("anomaly", {}).get("evidence") or []
+    parts = [
+        case.get("title"),
+        case.get("kind"),
+        case.get("severity"),
+        case.get("note"),
+        case.get("next_step"),
+    ]
+    for item in evidence:
+        parts.extend([item.get("agent"), item.get("row"), item.get("station"), item.get("value"), item.get("source_image")])
+    return " ".join(str(part) for part in parts if part is not None).lower()
+
+
+def solution_id_for_case(case: dict) -> str:
+    text = solution_text(case)
+    if re.search(r"\btable\s*4\b|table4|shunt|\bma\b|\bmv\b|current|6369|4386|345\.7|decimal", text) and re.search(r"current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7", text):
+        return "table4-current-decimal-scale"
+    if re.search(r"\btable\s*3\b|table3", text) and re.search(r"five|5\s+values|expected\s+five|expected\s+5|only\s+four|4\s+data|missing|count", text):
+        return "table3-five-reading-completeness"
+    if re.search(r"station|anode|\bmg\b|pair|coverage|group", text) and re.search(r"\btable\s*5\b|table5|\btable\s*6\b|table6|potential|current", text):
+        return "station-pairing-coverage"
+    if re.search(r"minus|negative|positive|polarity|sign|potential|\bv\s*dc\b|\btable\s*3\b|table3|\btable\s*6\b|table6", text):
+        return "potential-minus-sign-discipline"
+    return "general-anomaly-review"
+
+
+def prompt_for_case(case: dict, solution_id: str | None = None) -> str:
+    solution_rule = SOLUTION_RULES.get(solution_id or "")
     return json.dumps({
         "task": "Focused regression recheck for a CP report extraction anomaly. Re-read the source image(s) only, compare against the recorded failure, and decide whether the failure reproduces under the current reviewer guidance.",
+        "general_solution_under_test": {
+            "solution_id": solution_id,
+            "title": solution_rule.get("title") if solution_rule else None,
+            "instruction": solution_rule.get("prompt") if solution_rule else None,
+        },
         "case": {
             "title": case.get("title"),
             "kind": case.get("kind"),
@@ -153,9 +208,9 @@ def prompt_for_case(case: dict) -> str:
     }, separators=(",", ":"))
 
 
-def run_case(case: dict, log: RecheckLog) -> dict:
+def run_case(case: dict, log: RecheckLog, solution_id: str | None = None) -> dict:
     evidence = case.get("anomaly", {}).get("evidence") or []
-    content = [{"type": "input_text", "text": prompt_for_case(case)}]
+    content = [{"type": "input_text", "text": prompt_for_case(case, solution_id)}]
     image_count = 0
     for item in evidence[:12]:
         path = image_path(str(item.get("structure")), str(item.get("source_image")))
@@ -175,6 +230,7 @@ def run_case(case: dict, log: RecheckLog) -> dict:
         "title": case.get("title"),
         "kind": case.get("kind"),
         "severity": case.get("severity"),
+        "solution_id": solution_id_for_case(case),
         "review_note": case.get("note"),
         "image_count": image_count,
         "elapsed_seconds": elapsed,
@@ -187,18 +243,24 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--recheck-id", required=True)
     parser.add_argument("--limit", type=int, default=12)
+    parser.add_argument("--solution-id", choices=sorted(SOLUTION_RULES), default=None)
     args = parser.parse_args()
 
     run_dir = RECHECKS / args.recheck_id
     run_dir.mkdir(parents=True, exist_ok=True)
     log = RecheckLog(run_dir)
-    cases = latest_cases()[: args.limit]
+    cases = latest_cases()
+    if args.solution_id:
+        cases = [case for case in cases if solution_id_for_case(case) == args.solution_id]
+        log.state["solution_id"] = args.solution_id
+        log.state["solution_title"] = SOLUTION_RULES[args.solution_id]["title"]
+    cases = cases[: args.limit]
     log.state["cases_total"] = len(cases)
     log.write()
     try:
         for case in cases:
             try:
-                result = run_case(case, log)
+                result = run_case(case, log, args.solution_id)
             except Exception as exc:
                 result = {
                     "case_id": case.get("case_id"),

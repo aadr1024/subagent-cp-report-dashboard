@@ -19,6 +19,7 @@ let pendingLauncherRender = false;
 let pendingStatsRender = null;
 let pendingValidationRender = null;
 let pendingFeedbackRender = null;
+let pendingSolutionRender = null;
 let pendingRegressionRender = null;
 let activityEvents = [];
 let activityRuns = [];
@@ -28,6 +29,7 @@ let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
 let latestFeedbackStatus = null;
 let latestRegressionCases = [];
+let latestRegressionSolutions = [];
 let anomalyFloatingPreview = null;
 const anomalyNoteDrafts = new Map();
 let validationEditLockUntil = 0;
@@ -598,6 +600,7 @@ function dashboardScrollSnapshot() {
     ...captureScrollPositions("#validationPanel .validation-list"),
     ...captureScrollPositions("#validationPanel .validation-event-log"),
     ...captureScrollPositions("#feedbackLifecycle .feedback-life-list"),
+    ...captureScrollPositions("#solutionSuite .solution-list"),
     ...captureScrollPositions("#regressionLedger .regression-list"),
     ...captureScrollPositions("#events"),
     ...captureScrollPositions("#artifacts"),
@@ -628,7 +631,7 @@ function rememberAnomalyDraft(input) {
 }
 
 function markScrollablePanelBusy(event) {
-  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #regressionLedger .regression-list, #events, #artifacts")) return;
+  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts")) return;
   scrollablePanelQuietUntil = Date.now() + 700;
 }
 
@@ -1015,6 +1018,8 @@ async function saveAnomaly(button, status = "saved") {
     if (route) route.textContent = `${label} · persisted as validation metadata; error-case ledger is updated automatically when your note describes a repeatable issue.`;
     pollValidation();
     pollFeedbackStatus();
+    pollRegressionSolutions();
+    pollRegressionLedger();
   }
 }
 
@@ -1060,6 +1065,85 @@ async function pollFeedbackStatus() {
     const res = await fetch("/api/feedback/status", { cache: "no-store" });
     if (!res.ok) return;
     renderFeedbackLifecycle(await res.json());
+  } catch {}
+}
+
+function renderSolutionSuite(payload) {
+  latestRegressionSolutions = payload.solutions || [];
+  const panel = $("solutionSuite");
+  if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingSolutionRender = payload;
+    return;
+  }
+  const scrollSnapshot = dashboardScrollSnapshot();
+  const totals = payload.totals || {};
+  $("solutionSuiteUpdated").textContent = `${totals.solutions || 0} solution class${totals.solutions === 1 ? "" : "es"} · ${totals.solved || 0}/${totals.cases || 0} solved`;
+  panel.innerHTML = latestRegressionSolutions.length ? `<div class="solution-summary">
+      <div class="stat-card"><span>Solution classes</span><strong>${totals.solutions || 0}</strong><small>general reusable fixes</small></div>
+      <div class="stat-card"><span>Replay cases</span><strong>${totals.cases || 0}</strong><small><mark class="ok">${totals.solved || 0} solved</mark> <mark class="bad">${totals.open || 0} open</mark> <mark class="hot">${totals.needs_review || 0} review</mark></small></div>
+      <div class="stat-card"><span>Not replayed</span><strong>${totals.not_run || 0}</strong><small>recorded but not tested under latest solution</small></div>
+    </div>
+    <div class="solution-list">${latestRegressionSolutions.map(renderSolutionCard).join("")}</div>`
+    : `<div class="message">No solution classes yet. Save anomaly reviews that describe repeatable errors; they become replayable general solution tests here.</div>`;
+  restoreScrollPositions(scrollSnapshot);
+}
+
+function renderSolutionCard(solution) {
+  const counts = solution.counts || {};
+  const statusLabel = solution.status || "not-run";
+  const lessons = solution.lessons || [];
+  const graph = solution.agent_graph || [];
+  return `<article class="solution-card ${escapeHtml(statusLabel)}" data-solution-id="${escapeHtml(solution.solution_id || "")}">
+    <div class="solution-head">
+      <div>
+        <strong>${escapeHtml(solution.title || "General solution")}</strong>
+        <div class="message">${escapeHtml(solution.problem || "")}</div>
+      </div>
+      <div class="solution-tags">
+        <mark class="${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</mark>
+        <mark>${counts.solved || 0}/${counts.total || 0} solved</mark>
+        ${counts.open ? `<mark class="bad">${counts.open} open</mark>` : ""}
+        ${counts.needs_review ? `<mark class="hot">${counts.needs_review} review</mark>` : ""}
+      </div>
+    </div>
+    <div class="solution-body">
+      <div class="solution-explanation">
+        <div><span>Reusable fix</span><p>${escapeHtml(solution.solution || "")}</p></div>
+        <div><span>Detection rule</span><p>${escapeHtml(solution.detection_rule || "")}</p></div>
+        <div><span>Replay target</span><p>${escapeHtml(solution.latest_recheck_id ? `latest replay ${solution.latest_recheck_id}` : "not replayed yet")}</p></div>
+      </div>
+      <div class="solution-graph">${graph.map((step, index) => `<div><b>${index + 1}</b><span>${escapeHtml(step)}</span></div>`).join("")}</div>
+    </div>
+    ${lessons.length ? `<div class="solution-lessons">${lessons.map((lesson) => `<mark>${escapeHtml(lesson)}</mark>`).join("")}</div>` : ""}
+    <div class="solution-cases">${(solution.cases || []).map(renderSolutionCase).join("")}</div>
+    <div class="solution-actions">
+      <button class="small-btn replay-solution" data-solution-id="${escapeHtml(solution.solution_id || "")}">Replay this solution</button>
+      <small>Runs only matching recorded cases through the focused OpenAI recheck leaf.</small>
+    </div>
+  </article>`;
+}
+
+function renderSolutionCase(item) {
+  const result = item.result || null;
+  const readings = result?.readings || [];
+  const evidence = item.evidence || {};
+  return `<div class="solution-case ${escapeHtml(item.outcome || "not-run")}">
+    <div>
+      <strong>${escapeHtml(item.title || "Replay case")}</strong>
+      <span>${escapeHtml((evidence.structures || []).map((s) => `STR ${s}`).join(", ") || item.kind || "")}</span>
+    </div>
+    <mark>${escapeHtml(item.outcome || "not-run")}</mark>
+    ${result?.summary ? `<em>${escapeHtml(result.summary)}</em>` : `<em>${escapeHtml(item.note || "Recorded case waiting for replay.")}</em>`}
+    ${readings.length ? `<div class="solution-readings">${readings.slice(0, 6).map((reading) => `<span>${escapeHtml(reading.source_image || "")}: ${escapeHtml(reading.old_value || "")} -> ${escapeHtml(reading.rechecked_value || "")} ${escapeHtml(reading.unit || "")}</span>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+async function pollRegressionSolutions() {
+  try {
+    const res = await fetch("/api/regression/solutions", { cache: "no-store" });
+    if (!res.ok) return;
+    renderSolutionSuite(await res.json());
   } catch {}
 }
 
@@ -1121,19 +1205,21 @@ async function pollRegressionLedger() {
   } catch {}
 }
 
-async function startRegressionRecheck() {
-  const button = $("startRegressionRecheckBtn");
+async function startRegressionRecheck(solutionId = "") {
+  const button = solutionId ? document.querySelector(`.replay-solution[data-solution-id="${CSS.escape(solutionId)}"]`) : $("startRegressionRecheckBtn");
   if (button) {
     button.disabled = true;
-    button.textContent = "Starting rechecks";
+    button.textContent = solutionId ? "Replaying" : "Starting rechecks";
   }
-  await fetch("/api/regression/recheck/start", { method: "POST" });
+  const suffix = solutionId ? `?solution=${encodeURIComponent(solutionId)}` : "";
+  await fetch(`/api/regression/recheck/start${suffix}`, { method: "POST" });
   setTimeout(() => {
     if (button) {
       button.disabled = false;
-      button.textContent = "Run focused rechecks";
+      button.textContent = solutionId ? "Replay this solution" : "Run focused rechecks";
     }
   }, 1600);
+  pollRegressionSolutions();
   pollRegressionLedger();
 }
 
@@ -1473,7 +1559,7 @@ function escapeHtml(value) {
 
 $("startBtn").addEventListener("click", startRun);
 $("startValidationBtn")?.addEventListener("click", startValidation);
-$("startRegressionRecheckBtn")?.addEventListener("click", startRegressionRecheck);
+$("startRegressionRecheckBtn")?.addEventListener("click", () => startRegressionRecheck());
 $("structurePickerBtn").addEventListener("click", () => {
   $("structurePicker").hidden = !$("structurePicker").hidden;
 });
@@ -1527,6 +1613,8 @@ document.addEventListener("click", (event) => {
   if (save) saveAnomaly(save, "saved");
   const good = event.target.closest(".good-anomaly");
   if (good) saveAnomaly(good, "good");
+  const replaySolution = event.target.closest(".replay-solution");
+  if (replaySolution) startRegressionRecheck(replaySolution.dataset.solutionId || "");
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
@@ -1747,11 +1835,13 @@ poll();
 pollActivity();
 pollValidation();
 pollFeedbackStatus();
+pollRegressionSolutions();
 pollRegressionLedger();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollFeedbackStatus, 3500);
+setInterval(pollRegressionSolutions, 3500);
 setInterval(pollRegressionLedger, 3500);
 setInterval(() => {
   if (pendingStates && Date.now() >= deferRenderUntil) renderRunBoards(pendingStates);
@@ -1780,6 +1870,11 @@ setInterval(() => {
     const feedback = pendingFeedbackRender;
     pendingFeedbackRender = null;
     renderFeedbackLifecycle(feedback);
+  }
+  if (pendingSolutionRender) {
+    const solutions = pendingSolutionRender;
+    pendingSolutionRender = null;
+    renderSolutionSuite(solutions);
   }
   if (pendingRegressionRender) {
     const regression = pendingRegressionRender;
