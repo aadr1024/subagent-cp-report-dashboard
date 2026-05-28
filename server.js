@@ -17,6 +17,9 @@ const FEEDBACK_PROCESSING = path.join(RUNS, "feedback-processing.jsonl");
 const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
 const SOLUTION_FEEDBACK = path.join(RUNS, "solution-feedback.jsonl");
 const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
+const CORRECTION_PROMOTIONS = path.join(RUNS, "correction-promotions.jsonl");
+const CLOSED_LOOP_LEDGER = path.join(RUNS, "closed-loop-clean.jsonl");
+const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 const SOLUTION_DEFINITIONS = {
@@ -1028,6 +1031,125 @@ function stats() {
 function activityFeed() {
   const events = [];
   const active_runs = [];
+  const pushEvent = (event) => {
+    events.push({
+      run_id: event.run_id || "system",
+      structure: event.structure || null,
+      status: event.status || "unknown",
+      seq: Number(event.seq || 0),
+      at: event.at || null,
+      type: event.type || "event",
+      message: event.message || "",
+    });
+  };
+  const closedLoop = readJsonFile(CLOSED_LOOP_STATUS, null);
+  if (closedLoop) {
+    active_runs.push({
+      run_id: closedLoop.loop_id || "closed-loop-clean",
+      structure: "closed-loop",
+      status: closedLoop.status || "running",
+      active_step: closedLoop.stage || null,
+      active_agent: closedLoop.agent || "closed-loop-orchestrator",
+      updated_at: closedLoop.updated_at || closedLoop.at || null,
+      api_calls: closedLoop.api_calls || 0,
+      artifacts: closedLoop.artifacts || 0,
+    });
+    pushEvent({
+      run_id: closedLoop.loop_id || "closed-loop-clean",
+      structure: "closed-loop",
+      status: closedLoop.status || "running",
+      seq: 10_000_000,
+      at: closedLoop.updated_at || closedLoop.at,
+      type: "closed-loop",
+      message: `${closedLoop.stage || "closed loop"}: ${closedLoop.message || ""}`.trim(),
+    });
+  }
+  for (const item of readJsonLines(CLOSED_LOOP_LEDGER).slice(-12)) {
+    pushEvent({
+      run_id: "closed-loop-clean",
+      structure: "closed-loop",
+      status: item.status || "ledger",
+      seq: 9_900_000,
+      at: item.at,
+      type: "closed-loop-ledger",
+      message: `iteration ${item.iteration || "?"}: ${item.status || "recorded"}; anomalies=${item.anomaly_count ?? "?"}; readback mismatches=${item.readback?.mismatch_count ?? "?"}`,
+    });
+  }
+  for (const dir of validationDirs().slice(0, 8)) {
+    const validationId = path.basename(dir);
+    const state = readJsonFile(path.join(dir, "state.json"), {});
+    const validationEvents = readJsonLines(path.join(dir, "events.jsonl")).slice(-18);
+    if (state.status === "running" && controlProcessAlive(dir, state.updated_at || state.started_at)) {
+      const runningAgent = Object.values(state.agents || {}).find((agent) => agent.status === "running");
+      active_runs.push({
+        run_id: validationId,
+        structure: "validation",
+        status: state.status,
+        active_step: runningAgent?.name || "validation",
+        active_agent: runningAgent?.name || "validation-orchestrator",
+        updated_at: state.updated_at || state.started_at || null,
+        api_calls: 0,
+        artifacts: state.anomalies?.length || 0,
+      });
+    }
+    for (const event of validationEvents) {
+      pushEvent({
+        run_id: validationId,
+        structure: "validation",
+        status: state.status || "unknown",
+        seq: Number(event.seq || 0),
+        at: event.at,
+        type: `validation:${event.type || "event"}`,
+        message: event.message || "",
+      });
+    }
+  }
+  const recheckDirs = fs.readdirSync(REGRESSION_RECHECKS, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(REGRESSION_RECHECKS, entry.name))
+    .sort((a, b) => String(path.basename(b)).localeCompare(String(path.basename(a))))
+    .slice(0, 8);
+  for (const dir of recheckDirs) {
+    const recheckId = path.basename(dir);
+    const state = readJsonFile(path.join(dir, "state.json"), {});
+    const recheckEvents = readJsonLines(path.join(dir, "events.jsonl")).slice(-22);
+    if (state.status === "running" && controlProcessAlive(dir, state.updated_at || state.started_at)) {
+      active_runs.push({
+        run_id: recheckId,
+        structure: "recheck",
+        status: state.status,
+        active_step: state.active_node || "focused replay",
+        active_agent: state.active_node || "focused-openai-leaf",
+        updated_at: state.updated_at || state.started_at || null,
+        api_calls: state.cases_done || 0,
+        artifacts: state.cases_total || 0,
+      });
+    }
+    for (const event of recheckEvents) {
+      pushEvent({
+        run_id: recheckId,
+        structure: "recheck",
+        status: state.status || "unknown",
+        seq: Number(event.seq || 0),
+        at: event.at,
+        type: `recheck:${event.type || "event"}`,
+        message: event.message || "",
+      });
+    }
+  }
+  for (const item of readJsonLines(CORRECTION_PROMOTIONS).slice(-16)) {
+    const writes = item.docx_writes || [];
+    const failed = writes.filter((write) => write.docx_write === "failed").length;
+    pushEvent({
+      run_id: "correction-promoter",
+      structure: "DOCX",
+      status: failed ? "failed" : "complete",
+      seq: 9_800_000,
+      at: item.at,
+      type: "docx-promotion",
+      message: `promoted ${item.candidate_count || 0} correction(s) across ${item.run_count || 0} run(s); docx writes=${writes.length}; failed=${failed}`,
+    });
+  }
   const runs = listRuns();
   const runningIds = new Set();
   for (const run of runs) {
@@ -1074,6 +1196,21 @@ function activityFeed() {
       .sort((a, b) => (Date.parse(b.at || "") || 0) - (Date.parse(a.at || "") || 0) || Number(b.seq || 0) - Number(a.seq || 0))
       .slice(0, 80),
   };
+}
+
+function controlProcessAlive(dir, updatedAt = null) {
+  const control = readJsonFile(path.join(dir, "server-control.json"), {});
+  const pid = Number(control.pid || 0);
+  if (!pid) {
+    const age = Date.now() - (Date.parse(updatedAt || "") || 0);
+    return Number.isFinite(age) && age >= 0 && age < 45_000;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function stamp() {
