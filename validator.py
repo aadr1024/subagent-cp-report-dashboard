@@ -14,6 +14,8 @@ sys.path.insert(0, "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2
 
 from sba_report_tool.openai_api import create_response, response_text
 
+import docx_review
+
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -46,6 +48,7 @@ class ValidationLog:
                 "decimal-scale-validator": {"name": "decimal-scale-validator", "status": "pending", "message": "Queued"},
                 "unit-sanity-validator": {"name": "unit-sanity-validator", "status": "pending", "message": "Queued"},
                 "station-pair-validator": {"name": "station-pair-validator", "status": "pending", "message": "Queued"},
+                "docx-review-validator": {"name": "docx-review-validator", "status": "pending", "message": "Queued"},
                 "llm-reviewer": {"name": "llm-reviewer", "status": "pending", "message": "Queued"},
             },
             "anomalies": [],
@@ -659,6 +662,49 @@ def suppress_previously_resolved(anomalies: list[dict]) -> tuple[list[dict], lis
     return kept, suppressed
 
 
+def docx_review_flags(log: ValidationLog) -> list[dict]:
+    log.agent("docx-review-validator", "running", "Reading final DOCX and comparing against writer cell patches")
+    payload = docx_review.build_payload()
+    flags = []
+    blocking = {"missing_write", "mismatch", "patch_error"}
+    for structure in payload.get("structures") or []:
+        evidence = []
+        for slot in structure.get("slots") or []:
+            if slot.get("status") not in blocking:
+                continue
+            evidence.append({
+                "structure": structure.get("structure"),
+                "run_id": structure.get("run_id"),
+                "agent": slot.get("agent"),
+                "table": slot.get("table_key"),
+                "row": slot.get("row_index"),
+                "col": slot.get("col_index"),
+                "source_image": slot.get("source_ref"),
+                "value": slot.get("actual"),
+                "expected": slot.get("expected"),
+                "status": slot.get("status"),
+                "label": slot.get("label"),
+            })
+        if evidence:
+            flags.append(anomaly(
+                "docx_review_discrepancy",
+                "high",
+                f"STR {structure.get('structure')} final DOCX does not match expected writer cells",
+                "DOCX Review found missing-write, mismatch, or patch-error cells in the active final DOCX. These must be corrected before trusting the report.",
+                evidence,
+                0.99,
+            ))
+    summary = payload.get("summary") or {}
+    log.agent(
+        "docx-review-validator",
+        "complete",
+        f"DOCX review pass produced {len(flags)} blocking flags",
+        docx_review_summary=summary,
+        active_docx=payload.get("active_docx"),
+    )
+    return flags
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--validation-id", required=True)
@@ -671,12 +717,13 @@ def main() -> None:
         dataset = collect_dataset(log)
         (run_dir / "dataset.json").write_text(json.dumps(dataset["records"], indent=2) + "\n")
         preflags = deterministic_flags(dataset, log)
+        docx_flags = docx_review_flags(log)
         try:
-            llm_flags = llm_review(dataset, preflags, log)
+            llm_flags = llm_review(dataset, [*preflags, *docx_flags], log)
         except Exception as exc:
             llm_flags = []
             log.agent("llm-reviewer", "failed", f"OpenAI validation reviewer failed; keeping deterministic anomaly cards: {exc}")
-        anomalies, suppressed = suppress_previously_resolved(dedupe(clustered([*preflags, *llm_flags])))
+        anomalies, suppressed = suppress_previously_resolved(dedupe(clustered([*preflags, *docx_flags, *llm_flags])))
         if suppressed:
             with FEEDBACK_PROCESSING.open("a") as handle:
                 for item in suppressed:

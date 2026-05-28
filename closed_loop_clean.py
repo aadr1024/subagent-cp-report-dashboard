@@ -544,6 +544,26 @@ def clean_loop(max_iterations: int) -> dict:
     final_docx = str(apply_to_docx.SHARED_OUTPUT)
     heartbeat("start", "closed loop started", max_iterations=max_iterations)
     for iteration in range(1, max_iterations + 1):
+        heartbeat("feedback_correction", "routing human feedback into correction leaves before DOCX write", iteration=iteration, agent="feedback-correction-orchestrator")
+        feedback_command = run_command([sys.executable, str(ROOT / "feedback_correction_agent.py")], "feedback correction")
+        if feedback_command.get("returncode") != 0:
+            heartbeat("feedback_failed", "human feedback correction failed; not continuing to DOCX clean", iteration=iteration, status="feedback_failed", returncode=feedback_command.get("returncode"))
+            failed = {
+                "at": now(),
+                "iteration": iteration,
+                "status": "feedback_failed",
+                "feedback_command": feedback_command,
+                "final_docx": final_docx,
+            }
+            write_ledger(failed)
+            history.append(failed)
+            return {
+                "status": "feedback_failed",
+                "iterations": iteration,
+                "final_docx": final_docx,
+                "feedback_command": feedback_command,
+                "history": history,
+            }
         heartbeat("batch_docx_write", "writing all latest STR patches into the single final DOCX", iteration=iteration, agent="docx-writer")
         writes = rewrite_all_latest()
         write_failures = [item for item in writes if item["returncode"] != 0]
@@ -557,6 +577,7 @@ def clean_loop(max_iterations: int) -> dict:
             "at": now(),
             "iteration": iteration,
             "final_docx": final_docx,
+            "feedback_command": feedback_command,
             "writes": writes,
             "write_failures": write_failures,
             "readback": readback,

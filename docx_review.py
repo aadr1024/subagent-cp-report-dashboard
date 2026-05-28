@@ -59,8 +59,8 @@ def source_structures() -> dict[str, dict]:
     return out
 
 
-def run_dirs_by_structure() -> dict[str, tuple[Path, dict]]:
-    runs = {}
+def all_run_dirs_by_structure() -> dict[str, list[tuple[Path, dict]]]:
+    runs: dict[str, list[tuple[Path, dict]]] = {}
     skip = {"validations", "regression-rechecks", ".thumbs"}
     for path in RUNS.iterdir():
         if not path.is_dir() or path.name.startswith(".") or path.name in skip:
@@ -69,12 +69,14 @@ def run_dirs_by_structure() -> dict[str, tuple[Path, dict]]:
         structure = str(state.get("structure") or "").strip()
         if not structure:
             continue
-        current = runs.get(structure)
-        current_time = current[1].get("updated_at") if current else ""
-        state_time = state.get("updated_at") or state.get("started_at") or path.name
-        if not current or str(state_time) >= str(current_time):
-            runs[structure] = (path, state)
+        runs.setdefault(structure, []).append((path, state))
+    for items in runs.values():
+        items.sort(key=lambda item: str(item[1].get("updated_at") or item[1].get("started_at") or item[0].name))
     return runs
+
+
+def run_dirs_by_structure() -> dict[str, tuple[Path, dict]]:
+    return {structure: items[-1] for structure, items in all_run_dirs_by_structure().items() if items}
 
 
 def parse_docx_tables(docx: Path):
@@ -205,7 +207,7 @@ def summarize(slots: list[dict]) -> dict:
     }
 
 
-def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict]) -> dict:
+def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict], run_count: int = 0) -> dict:
     run_dir, state = run_item if run_item else (None, {})
     target_tables = state.get("target", {}).get("target_tables") or {}
     run_status = state.get("status") or ("not_started" if not run_item else "unknown")
@@ -252,6 +254,9 @@ def structure_payload(structure: str, source: dict, run_item, tables, specs: lis
         "structure": structure,
         "status": status,
         "run_id": state.get("run_id") if state else None,
+        "run_count": run_count,
+        "run_version": run_count if run_item else 0,
+        "run_version_label": f"{run_count} / {run_count}" if run_item and run_count else "0 / 0",
         "run_status": run_status,
         "updated_at": state.get("updated_at"),
         "source_folder": source.get("source_folder"),
@@ -263,17 +268,18 @@ def structure_payload(structure: str, source: dict, run_item, tables, specs: lis
     }
 
 
-def main() -> None:
+def build_payload() -> dict:
     source = apply_to_docx.load_report_source_of_truth()
     active_docx = Path(source["active_docx"])
     tables = parse_docx_tables(active_docx)
     sources = source_structures()
-    runs = run_dirs_by_structure()
+    all_runs = all_run_dirs_by_structure()
+    runs = {structure: items[-1] for structure, items in all_runs.items() if items}
     structures = sorted(set(sources) | set(runs), key=lambda value: int(value) if value.isdigit() else value)
     specs = slot_specs()
-    items = [structure_payload(structure, sources.get(structure, {}), runs.get(structure), tables, specs) for structure in structures]
+    items = [structure_payload(structure, sources.get(structure, {}), runs.get(structure), tables, specs, len(all_runs.get(structure, []))) for structure in structures]
     all_slots = [slot for item in items for slot in item["slots"]]
-    payload = {
+    return {
         "updated_at": stamp(),
         "source_of_truth": source,
         "active_docx": str(active_docx),
@@ -283,7 +289,10 @@ def main() -> None:
         "summary": summarize(all_slots),
         "structures": items,
     }
-    print(json.dumps(payload))
+
+
+def main() -> None:
+    print(json.dumps(build_payload()))
 
 
 if __name__ == "__main__":

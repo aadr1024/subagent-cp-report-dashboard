@@ -19,6 +19,7 @@ let pendingLauncherRender = false;
 let pendingStatsRender = null;
 let pendingValidationRender = null;
 let pendingDocxReviewRender = null;
+let pendingDashboardValidationRender = null;
 let pendingFeedbackRender = null;
 let pendingSolutionRender = null;
 let pendingRegressionRender = null;
@@ -28,6 +29,7 @@ let activityConcurrency = null;
 let activityUpdatedAt = null;
 let latestValidation = null;
 let latestDocxReview = null;
+let latestDashboardValidation = null;
 const docxOpenStructures = new Set();
 let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
@@ -467,13 +469,16 @@ function renderRunBoards(states) {
         const folderName = folderNameForState(state);
         const runEvents = (stateEventsByRun.get(state.run_id) || []).slice(-12).reverse();
         const output = state.output_docx ? `<div class="output-path">DOCX: ${escapeHtml(state.output_docx)}</div>` : "";
+        const version = runVersionInfo(state.structure, state.run_id);
+        const versionText = version.total ? `run ${version.index}/${version.total} · latest ${version.latest?.run_id || "?"}` : "run 0/0";
+        const isLatestRun = version.latest?.run_id === state.run_id;
         const isOpen = expanded.has(state.run_id);
         return `<article class="run-board ${cls(state.status)} ${isOpen ? "expanded" : "folded"}" data-run-id="${escapeHtml(state.run_id)}">
           <header class="run-head focus-run" data-run-id="${escapeHtml(state.run_id)}">
             <div>
               <div class="eyebrow">STR ${escapeHtml(state.structure || "?")} · ${escapeHtml(state.run_id || "")}</div>
               <h2>${escapeHtml(target.heading_to_write || `962L/986L STR ${state.structure || "?"}`)}</h2>
-              <div class="message">ordinal ${target.ordinal || "?"} · tables ${tables} · folder ${escapeHtml(folderName || "?")} · updated ${fmtTime(state.updated_at)}</div>
+              <div class="message">ordinal ${target.ordinal || "?"} · ${escapeHtml(versionText)}${isLatestRun ? "" : " · viewing older run"} · tables ${tables} · folder ${escapeHtml(folderName || "?")} · updated ${fmtTime(state.updated_at)}</div>
               ${output}
             </div>
             <div class="run-actions">
@@ -552,11 +557,12 @@ function renderLauncher() {
   $("reportLauncher").innerHTML = knownStructures.length
     ? `<div class="launcher-table">${knownStructures.map((item) => {
         const latest = latestByStructure.get(String(item.structure));
+        const version = runVersionInfo(item.structure, latest?.run_id || "");
         return `<article class="report-card ${cls(latest?.status || "pending")}">
           <div>
             <strong>${String(item.ordinal).padStart(3, "0")} · STR ${escapeHtml(item.structure)}</strong>
             <div class="message">${escapeHtml(item.folder)}</div>
-            ${latest ? `<div class="message">latest: ${escapeHtml(latest.run_id)} · ${escapeHtml(latest.status)}</div>` : `<div class="message">not run yet</div>`}
+            ${latest ? `<div class="message">latest: ${escapeHtml(latest.run_id)} · ${escapeHtml(latest.status)} · run ${version.index}/${version.total}</div>` : `<div class="message">not run yet · run 0/0</div>`}
           </div>
           <div class="report-actions">
             <button class="small-btn start-one" data-structure="${escapeHtml(item.structure)}">Start</button>
@@ -576,6 +582,17 @@ function latestRunMap() {
     if (!map.has(key)) map.set(key, run);
   }
   return map;
+}
+
+function runVersionInfo(structure, runId = "") {
+  const runs = knownRuns
+    .filter((run) => String(run.structure) === String(structure))
+    .slice()
+    .sort((a, b) => (Date.parse(a.updated_at || "") || 0) - (Date.parse(b.updated_at || "") || 0) || String(a.run_id).localeCompare(String(b.run_id)));
+  const total = runs.length;
+  const index = runId ? runs.findIndex((run) => run.run_id === runId) + 1 : total;
+  const latest = runs.at(-1) || null;
+  return { total, index: index || total, latest };
 }
 
 function captureScrollPositions(selector) {
@@ -609,6 +626,7 @@ function dashboardScrollSnapshot() {
     ...captureScrollPositions("#validationPanel .validation-event-log"),
     ...captureScrollPositions("#docxReviewPanel .docx-structure-list"),
     ...captureScrollPositions("#docxReviewPanel .docx-cell-grid"),
+    ...captureScrollPositions("#dashboardValidationPanel .dashboard-validation-list"),
     ...captureScrollPositions("#feedbackLifecycle .feedback-life-list"),
     ...captureScrollPositions("#solutionSuite .solution-list"),
     ...captureScrollPositions("#regressionLedger .regression-list"),
@@ -628,7 +646,7 @@ function scrollablePanelBusy() {
 function editingDashboardPanel() {
   const active = document.activeElement;
   if (!active) return false;
-  if (!active.closest?.("#validationPanel, #docxReviewPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
+  if (!active.closest?.("#validationPanel, #docxReviewPanel, #dashboardValidationPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
   return active.matches("input, textarea, select, [contenteditable='true']");
 }
 
@@ -645,7 +663,7 @@ function rememberAnomalyDraft(input) {
 }
 
 function markScrollablePanelBusy(event) {
-  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
+  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #dashboardValidationPanel .dashboard-validation-list, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
   if (!target) return;
   const quietMs = target.closest("#solutionSuite .solution-list") ? 6000 : 1600;
   scrollablePanelQuietUntil = Date.now() + quietMs;
@@ -1050,6 +1068,7 @@ function renderDocxStructure(item, index) {
       </div>
       <div class="docx-summary-tags">
         <mark class="${docxStatusClass(item.status)}">${escapeHtml((item.status || "unknown").replaceAll("_", " "))}</mark>
+        <mark>run ${escapeHtml(item.run_version_label || `${item.run_count || 0}/${item.run_count || 0}`)}</mark>
         <mark>${escapeHtml(docxReviewLine(summary))}</mark>
         ${summary.expected ? `<mark>${Number(summary.expected)} extracted</mark>` : ""}
         ${item.patch_error ? `<mark class="bad">patch issue</mark>` : ""}
@@ -1106,6 +1125,74 @@ async function pollDocxReview() {
   } catch {}
 }
 
+function dashboardValidationClass(status) {
+  if (status === "fail") return "bad";
+  if (status === "pass") return "ok";
+  return "monitor";
+}
+
+function renderDashboardValidationCase(item) {
+  const statusClass = dashboardValidationClass(item.status);
+  const evidence = item.evidence?.length
+    ? `<details><summary>evidence</summary><pre>${escapeHtml(JSON.stringify(item.evidence.slice(0, 3), null, 2))}</pre></details>`
+    : "";
+  return `<article class="dashboard-validation-case ${statusClass} ${item.active ? "active" : ""}">
+    <div class="dashboard-validation-case-head">
+      <div>
+        <strong>${escapeHtml(item.title || item.id || "validation case")}</strong>
+        <span>${escapeHtml(item.id || "")}</span>
+      </div>
+      <div class="docx-summary-tags">
+        <mark class="${statusClass}">${escapeHtml(item.status || "monitor")}</mark>
+        <mark>${escapeHtml(item.severity || "medium")}</mark>
+        ${item.active ? `<mark class="bad">active</mark>` : ""}
+      </div>
+    </div>
+    <p>${escapeHtml(item.detail || "")}</p>
+    <div class="dashboard-validation-actions">
+      <button class="small-btn replay-dashboard-case" data-case-id="${escapeHtml(item.id || "")}" type="button">Play check</button>
+      <span>${escapeHtml(item.updated_at ? timeAgo(item.updated_at) : "")}</span>
+    </div>
+    ${evidence}
+  </article>`;
+}
+
+function renderDashboardValidation(payload) {
+  latestDashboardValidation = payload;
+  const panel = $("dashboardValidationPanel");
+  if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingDashboardValidationRender = payload;
+    return;
+  }
+  const scrollSnapshot = dashboardScrollSnapshot();
+  const summary = payload?.summary || {};
+  const cases = payload?.cases || [];
+  const status = $("dashboardValidationStatus");
+  if (status) status.textContent = `${Number(summary.fail || 0)} failing · ${Number(summary.monitor || 0)} monitor · ${Number(summary.pass || 0)} passing`;
+  panel.innerHTML = `<div class="dashboard-validation-summary">
+    <div class="stat-card"><span>Failing</span><strong>${Number(summary.fail || 0)}</strong><small>shown first</small></div>
+    <div class="stat-card"><span>Monitoring</span><strong>${Number(summary.monitor || 0)}</strong><small>known bug classes</small></div>
+    <div class="stat-card"><span>Passing</span><strong>${Number(summary.pass || 0)}</strong><small>regression checks</small></div>
+    <div class="stat-card"><span>Active</span><strong>${Number(summary.active || 0)}</strong><small>currently being replayed/worked</small></div>
+  </div>
+  <div class="validation-note">Software validation set for this dashboard/pipeline. Product bugs we identify become replayable checks here; failing and active checks are pinned to the top.</div>
+  <div class="dashboard-validation-list">${cases.map(renderDashboardValidationCase).join("") || `<div class="message">No dashboard validation cases yet.</div>`}</div>`;
+  restoreScrollPositions(scrollSnapshot);
+}
+
+async function pollDashboardValidation(caseId = "", record = false) {
+  try {
+    const query = new URLSearchParams();
+    if (caseId) query.set("case", caseId);
+    if (record) query.set("record", "1");
+    const url = `/api/dashboard-validation${query.toString() ? `?${query}` : ""}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return;
+    renderDashboardValidation(await res.json());
+  } catch {}
+}
+
 async function startValidation() {
   const button = $("startValidationBtn");
   button.disabled = true;
@@ -1153,6 +1240,7 @@ async function saveAnomaly(button, status = "saved") {
     pollRegressionSolutions();
     pollRegressionLedger();
 pollDocxReview();
+pollDashboardValidation();
   }
 }
 
@@ -2135,6 +2223,8 @@ document.addEventListener("click", (event) => {
   if (playCase) startRegressionRecheck(playCase.dataset.solutionId || "", playCase.dataset.caseKey || "");
   const solutionFeedback = event.target.closest(".save-solution-feedback");
   if (solutionFeedback) saveSolutionFeedback(solutionFeedback);
+  const replayDashboard = event.target.closest(".replay-dashboard-case");
+  if (replayDashboard) pollDashboardValidation(replayDashboard.dataset.caseId || "", true);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
@@ -2362,6 +2452,7 @@ setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollDocxReview, 3000);
+setInterval(() => pollDashboardValidation(), 4000);
 setInterval(pollFeedbackStatus, 3500);
 setInterval(pollRegressionSolutions, 1000);
 setInterval(pollRegressionLedger, 3500);
@@ -2392,6 +2483,11 @@ setInterval(() => {
     const review = pendingDocxReviewRender;
     pendingDocxReviewRender = null;
     renderDocxReview(review);
+  }
+  if (pendingDashboardValidationRender) {
+    const dashboardValidation = pendingDashboardValidationRender;
+    pendingDashboardValidationRender = null;
+    renderDashboardValidation(dashboardValidation);
   }
   if (pendingFeedbackRender) {
     const feedback = pendingFeedbackRender;

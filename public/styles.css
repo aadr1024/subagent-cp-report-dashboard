@@ -1680,6 +1680,97 @@ main {
   overflow-wrap: anywhere;
 }
 
+.dashboard-validation-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.dashboard-validation-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.dashboard-validation-list {
+  display: grid;
+  gap: 10px;
+  max-height: 720px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.dashboard-validation-case {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 6px solid var(--yellow);
+  border-radius: 13px;
+  background: rgba(255, 253, 247, 0.86);
+}
+
+.dashboard-validation-case.ok {
+  border-left-color: var(--green);
+}
+
+.dashboard-validation-case.bad {
+  border-left-color: var(--red);
+  background: rgba(180, 52, 47, 0.055);
+}
+
+.dashboard-validation-case.monitor {
+  border-left-color: var(--yellow);
+}
+
+.dashboard-validation-case.active {
+  box-shadow: 0 0 0 3px rgba(201, 133, 17, 0.12);
+}
+
+.dashboard-validation-case-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.dashboard-validation-case-head > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.dashboard-validation-case-head span,
+.dashboard-validation-case p,
+.dashboard-validation-actions span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dashboard-validation-case p {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.dashboard-validation-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dashboard-validation-case details {
+  border-top: 1px solid rgba(217, 209, 194, 0.74);
+  padding-top: 7px;
+}
+
+.dashboard-validation-case pre {
+  max-height: 220px;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 9px;
+  background: rgba(47, 45, 41, 0.06);
+  font-size: 10px;
+}
+
 .validation-note {
   padding: 10px 12px;
   border: 1px solid rgba(30, 99, 143, 0.16);

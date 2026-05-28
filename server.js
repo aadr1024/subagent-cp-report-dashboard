@@ -20,7 +20,9 @@ const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const CORRECTION_PROMOTIONS = path.join(RUNS, "correction-promotions.jsonl");
 const CLOSED_LOOP_LEDGER = path.join(RUNS, "closed-loop-clean.jsonl");
 const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
+const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.json");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
+const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 const SOLUTION_DEFINITIONS = {
@@ -140,7 +142,7 @@ function openFinalReport(res) {
 
 function docxReviewInputMtime() {
   let max = 0;
-  const files = [REPORT_SOURCE_OF_TRUTH, CLOSED_LOOP_LEDGER, CLOSED_LOOP_STATUS];
+  const files = [REPORT_SOURCE_OF_TRUTH, CLOSED_LOOP_LEDGER, CLOSED_LOOP_STATUS, FEEDBACK_CORRECTION_STATUS];
   for (const file of files) {
     try { max = Math.max(max, fs.statSync(file).mtimeMs); } catch {}
   }
@@ -182,6 +184,30 @@ function docxReviewPayload() {
   const payload = JSON.parse(result.stdout || "{}");
   docxReviewCache = { key, at: Date.now(), payload };
   return { ...payload, cached: false };
+}
+
+function dashboardValidationPayload(url) {
+  const python = process.env.PYTHON || "python3";
+  const args = [DASHBOARD_VALIDATION_SCRIPT];
+  const selected = url.searchParams.get("case");
+  if (selected) args.push("--case", String(selected).replace(/[^a-zA-Z0-9_.-]/g, ""));
+  if (url.searchParams.get("record") === "1") args.push("--record");
+  const result = spawnSync(python, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    maxBuffer: 40 * 1024 * 1024,
+    timeout: 25_000,
+  });
+  if (result.status !== 0) {
+    return {
+      updated_at: new Date().toISOString(),
+      status: "failed",
+      error: result.stderr || result.stdout || `dashboard_validation.py exited ${result.status}`,
+      summary: {},
+      cases: [],
+    };
+  }
+  return JSON.parse(result.stdout || "{}");
 }
 
 function thumbFor(sourceFile, size = 720) {
@@ -1113,6 +1139,32 @@ function activityFeed() {
       message: `${closedLoop.stage || "closed loop"}: ${closedLoop.message || ""}`.trim(),
     });
   }
+  const feedbackCorrection = readJsonFile(FEEDBACK_CORRECTION_STATUS, null);
+  if (feedbackCorrection) {
+    const updatedAt = feedbackCorrection.updated_at || feedbackCorrection.at || null;
+    const recent = updatedAt && Date.now() - (Date.parse(updatedAt) || 0) < 90_000;
+    if (feedbackCorrection.status === "running" || recent) {
+      active_runs.push({
+        run_id: "feedback-correction-agent",
+        structure: "feedback",
+        status: feedbackCorrection.status || "unknown",
+        active_step: "human-feedback-correction",
+        active_agent: feedbackCorrection.agent || "feedback-correction-orchestrator",
+        updated_at: updatedAt,
+        api_calls: 0,
+        artifacts: Number(feedbackCorrection.processed || 0),
+      });
+    }
+    pushEvent({
+      run_id: "feedback-correction-agent",
+      structure: "feedback",
+      status: feedbackCorrection.status || "unknown",
+      seq: 9_950_000,
+      at: updatedAt,
+      type: "feedback-correction",
+      message: `feedback correction: ${feedbackCorrection.status || "unknown"}; processed=${feedbackCorrection.processed ?? feedbackCorrection.pending ?? 0}`,
+    });
+  }
   for (const item of readJsonLines(CLOSED_LOOP_LEDGER).slice(-12)) {
     pushEvent({
       run_id: "closed-loop-clean",
@@ -1478,6 +1530,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/report/source-of-truth") return json(res, 200, reportSourceOfTruth());
   if (url.pathname === "/api/report/open-final") return openFinalReport(res);
   if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
+  if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/stats") return json(res, 200, stats());
   if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
   if (url.pathname === "/api/validation") return json(res, 200, validationPayload());
