@@ -18,6 +18,7 @@ let pendingRailRender = false;
 let pendingLauncherRender = false;
 let pendingStatsRender = null;
 let pendingValidationRender = null;
+let pendingDocxReviewRender = null;
 let pendingFeedbackRender = null;
 let pendingSolutionRender = null;
 let pendingRegressionRender = null;
@@ -26,6 +27,8 @@ let activityRuns = [];
 let activityConcurrency = null;
 let activityUpdatedAt = null;
 let latestValidation = null;
+let latestDocxReview = null;
+const docxOpenStructures = new Set();
 let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
@@ -604,6 +607,8 @@ function dashboardScrollSnapshot() {
     ...captureScrollPositions("#statsPanel .health-list"),
     ...captureScrollPositions("#validationPanel .validation-list"),
     ...captureScrollPositions("#validationPanel .validation-event-log"),
+    ...captureScrollPositions("#docxReviewPanel .docx-structure-list"),
+    ...captureScrollPositions("#docxReviewPanel .docx-cell-grid"),
     ...captureScrollPositions("#feedbackLifecycle .feedback-life-list"),
     ...captureScrollPositions("#solutionSuite .solution-list"),
     ...captureScrollPositions("#regressionLedger .regression-list"),
@@ -623,7 +628,7 @@ function scrollablePanelBusy() {
 function editingDashboardPanel() {
   const active = document.activeElement;
   if (!active) return false;
-  if (!active.closest?.("#validationPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
+  if (!active.closest?.("#validationPanel, #docxReviewPanel, #feedbackLifecycle, #regressionLedger, #runBoards")) return false;
   return active.matches("input, textarea, select, [contenteditable='true']");
 }
 
@@ -640,7 +645,7 @@ function rememberAnomalyDraft(input) {
 }
 
 function markScrollablePanelBusy(event) {
-  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
+  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
   if (!target) return;
   const quietMs = target.closest("#solutionSuite .solution-list") ? 6000 : 1600;
   scrollablePanelQuietUntil = Date.now() + quietMs;
@@ -994,6 +999,113 @@ async function pollValidation() {
   } catch {}
 }
 
+function docxStatusClass(status) {
+  if (["missing_write", "mismatch", "patch_error", "needs_attention"].includes(status)) return "bad";
+  if (["blank", "partial_or_blank"].includes(status)) return "blank";
+  if (["matched", "complete"].includes(status)) return "ok";
+  if (["docx_only"].includes(status)) return "docx-only";
+  return "idle";
+}
+
+function docxReviewLine(summary = {}) {
+  return `${Number(summary.filled || 0)}/${Number(summary.total || 0)} filled · ${Number(summary.blank || 0)} blank · ${Number(summary.mismatch || 0) + Number(summary.missing_write || 0) + Number(summary.patch_error || 0)} blocking`;
+}
+
+function groupDocxSlots(slots = []) {
+  const groups = new Map();
+  for (const slot of slots) {
+    const key = slot.group || slot.table_key || "DOCX";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  return [...groups.entries()].map(([title, items]) => ({ title, items }));
+}
+
+function renderDocxCell(slot) {
+  const actual = String(slot.actual || "").trim();
+  const expected = String(slot.expected || "").trim();
+  const status = slot.status || "blank";
+  const meta = [
+    expected ? `expected ${expected}` : "no extracted value",
+    slot.source_ref ? `source ${slot.source_ref}` : "",
+    slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
+  ].filter(Boolean).join(" · ");
+  return `<div class="docx-cell ${docxStatusClass(status)}" title="${escapeHtml(meta)}">
+    <span>${escapeHtml(slot.label || "cell")}</span>
+    <strong>${escapeHtml(actual || "blank")}</strong>
+    <small>${escapeHtml(status.replaceAll("_", " "))}${expected && actual !== expected ? ` · should be ${escapeHtml(expected)}` : ""}</small>
+  </div>`;
+}
+
+function renderDocxStructure(item, index) {
+  const structure = String(item.structure || "?");
+  const summary = item.summary || {};
+  const shouldOpen = docxOpenStructures.has(structure) || (!docxOpenStructures.size && index < 1 && item.status !== "complete");
+  const groups = groupDocxSlots(item.slots || []);
+  return `<details class="docx-structure ${docxStatusClass(item.status)}" data-structure="${escapeHtml(structure)}" ${shouldOpen ? "open" : ""}>
+    <summary>
+      <div>
+        <strong>STR ${escapeHtml(structure)}</strong>
+        <span>${escapeHtml(item.source_folder_name || item.run_id || "no source folder")}</span>
+      </div>
+      <div class="docx-summary-tags">
+        <mark class="${docxStatusClass(item.status)}">${escapeHtml((item.status || "unknown").replaceAll("_", " "))}</mark>
+        <mark>${escapeHtml(docxReviewLine(summary))}</mark>
+        ${summary.expected ? `<mark>${Number(summary.expected)} extracted</mark>` : ""}
+        ${item.patch_error ? `<mark class="bad">patch issue</mark>` : ""}
+      </div>
+    </summary>
+    ${item.patch_error ? `<div class="docx-warning">${escapeHtml(item.patch_error)}</div>` : ""}
+    <div class="docx-table-list">
+      ${groups.map((group) => `<section class="docx-table-block">
+        <div class="docx-table-head"><strong>${escapeHtml(group.title)}</strong><span>${Number(group.items.filter((slot) => String(slot.actual || "").trim()).length)}/${group.items.length} filled</span></div>
+        <div class="docx-cell-grid">${group.items.map(renderDocxCell).join("")}</div>
+      </section>`).join("")}
+    </div>
+  </details>`;
+}
+
+function renderDocxReview(payload) {
+  latestDocxReview = payload;
+  const panel = $("docxReviewPanel");
+  if (!panel) return;
+  if (scrollablePanelBusy() && panel.innerHTML.trim()) {
+    pendingDocxReviewRender = payload;
+    return;
+  }
+  const status = $("docxReviewStatus");
+  const scrollSnapshot = dashboardScrollSnapshot();
+  if (!payload || payload.status === "failed") {
+    if (status) status.textContent = "DOCX review failed";
+    panel.innerHTML = `<div class="message">DOCX review unavailable: ${escapeHtml(payload?.error || "no payload")}</div>`;
+    restoreScrollPositions(scrollSnapshot);
+    return;
+  }
+  const summary = payload.summary || {};
+  const structures = payload.structures || [];
+  if (status) status.textContent = `${docxReviewLine(summary)} · ${Number(payload.structure_count || structures.length)} STRs`;
+  panel.innerHTML = `<div class="docx-review-summary">
+    <div class="stat-card"><span>Single source</span><strong>${escapeHtml(payload.active_docx_exists ? "active DOCX" : "missing")}</strong><small>${escapeHtml(payload.active_docx_mtime || "no mtime")}</small></div>
+    <div class="stat-card"><span>Cells</span><strong>${Number(summary.filled || 0)}/${Number(summary.total || 0)}</strong><small>actual DOCX filled</small></div>
+    <div class="stat-card"><span>Blanks</span><strong>${Number(summary.blank || 0)}</strong><small>visible empty slots</small></div>
+    <div class="stat-card"><span>Blocking</span><strong>${Number(summary.problem || 0)}</strong><small>missing write / mismatch / patch issue</small></div>
+  </div>
+  <div class="validation-note">This panel reads the final DOCX file and compares it against the same cell patches used by the DOCX writer. If Word saves a manual change, the next refresh reflects the saved document state.</div>
+  <div class="docx-legend">
+    <mark class="ok">matched</mark><mark class="blank">blank</mark><mark class="bad">blocking</mark><mark class="docx-only">docx-only</mark><mark class="idle">not started</mark>
+  </div>
+  <div class="docx-structure-list">${structures.map(renderDocxStructure).join("") || `<div class="message">No DOCX targets known yet.</div>`}</div>`;
+  restoreScrollPositions(scrollSnapshot);
+}
+
+async function pollDocxReview() {
+  try {
+    const res = await fetch("/api/docx-review", { cache: "no-store" });
+    if (!res.ok) return;
+    renderDocxReview(await res.json());
+  } catch {}
+}
+
 async function startValidation() {
   const button = $("startValidationBtn");
   button.disabled = true;
@@ -1040,6 +1152,7 @@ async function saveAnomaly(button, status = "saved") {
     pollFeedbackStatus();
     pollRegressionSolutions();
     pollRegressionLedger();
+pollDocxReview();
   }
 }
 
@@ -1963,6 +2076,13 @@ $("structureOptions").addEventListener("change", (event) => {
   else selectedStructures.delete(event.target.value);
   renderStructurePicker();
 });
+document.addEventListener("toggle", (event) => {
+  const details = event.target.closest?.(".docx-structure");
+  if (!details?.dataset.structure) return;
+  if (details.open) docxOpenStructures.add(details.dataset.structure);
+  else docxOpenStructures.delete(details.dataset.structure);
+}, true);
+
 document.addEventListener("click", (event) => {
   const start = event.target.closest(".start-one");
   if (start) startOne(start.dataset.structure);
@@ -2241,6 +2361,7 @@ pollRegressionLedger();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
+setInterval(pollDocxReview, 3000);
 setInterval(pollFeedbackStatus, 3500);
 setInterval(pollRegressionSolutions, 1000);
 setInterval(pollRegressionLedger, 3500);
@@ -2266,6 +2387,11 @@ setInterval(() => {
     const validation = pendingValidationRender;
     pendingValidationRender = null;
     renderValidation(validation);
+  }
+  if (pendingDocxReviewRender) {
+    const review = pendingDocxReviewRender;
+    pendingDocxReviewRender = null;
+    renderDocxReview(review);
   }
   if (pendingFeedbackRender) {
     const feedback = pendingFeedbackRender;

@@ -20,6 +20,7 @@ const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const CORRECTION_PROMOTIONS = path.join(RUNS, "correction-promotions.jsonl");
 const CLOSED_LOOP_LEDGER = path.join(RUNS, "closed-loop-clean.jsonl");
 const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
+const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
 const SOLUTION_DEFINITIONS = {
@@ -59,6 +60,8 @@ fs.mkdirSync(RUNS, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
 fs.mkdirSync(VALIDATIONS, { recursive: true });
 fs.mkdirSync(REGRESSION_RECHECKS, { recursive: true });
+
+let docxReviewCache = { key: "", at: 0, payload: null };
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -133,6 +136,52 @@ function openFinalReport(res) {
   });
   child.unref();
   json(res, 202, { ok: true, opened: source.active_docx, source });
+}
+
+function docxReviewInputMtime() {
+  let max = 0;
+  const files = [REPORT_SOURCE_OF_TRUTH, CLOSED_LOOP_LEDGER, CLOSED_LOOP_STATUS];
+  for (const file of files) {
+    try { max = Math.max(max, fs.statSync(file).mtimeMs); } catch {}
+  }
+  for (const entry of fs.readdirSync(RUNS, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith(".") || ["validations", "regression-rechecks", ".thumbs"].includes(entry.name)) continue;
+    const dir = path.join(RUNS, entry.name);
+    for (const name of ["state.json", "leaf-results.json", "docx-cell-patch.json", "docx-readback.json"]) {
+      try { max = Math.max(max, fs.statSync(path.join(dir, name)).mtimeMs); } catch {}
+    }
+  }
+  return max;
+}
+
+function docxReviewPayload() {
+  const source = reportSourceOfTruth();
+  const docxMtime = source.active_exists ? fs.statSync(source.active_docx).mtimeMs : 0;
+  const inputMtime = docxReviewInputMtime();
+  const key = `${docxMtime}:${inputMtime}`;
+  if (docxReviewCache.payload && docxReviewCache.key === key && Date.now() - docxReviewCache.at < 2500) {
+    return { ...docxReviewCache.payload, cached: true };
+  }
+  const python = process.env.PYTHON || "python3";
+  const result = spawnSync(python, [DOCX_REVIEW_SCRIPT], {
+    cwd: ROOT,
+    encoding: "utf8",
+    maxBuffer: 60 * 1024 * 1024,
+    timeout: 25_000,
+  });
+  if (result.status !== 0) {
+    return {
+      updated_at: new Date().toISOString(),
+      status: "failed",
+      error: result.stderr || result.stdout || `docx_review.py exited ${result.status}`,
+      source_of_truth: source,
+      summary: {},
+      structures: [],
+    };
+  }
+  const payload = JSON.parse(result.stdout || "{}");
+  docxReviewCache = { key, at: Date.now(), payload };
+  return { ...payload, cached: false };
 }
 
 function thumbFor(sourceFile, size = 720) {
@@ -1428,6 +1477,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
   if (url.pathname === "/api/report/source-of-truth") return json(res, 200, reportSourceOfTruth());
   if (url.pathname === "/api/report/open-final") return openFinalReport(res);
+  if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
   if (url.pathname === "/api/stats") return json(res, 200, stats());
   if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
   if (url.pathname === "/api/validation") return json(res, 200, validationPayload());
