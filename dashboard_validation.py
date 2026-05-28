@@ -12,9 +12,14 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 VALIDATIONS = RUNS / "validations"
 GLOBAL_FEEDBACK = RUNS / "global-feedback.jsonl"
+SOFTWARE_VALIDATION_FEEDBACK = RUNS / "software-validation-feedback.jsonl"
 FEEDBACK_CORRECTION_LEDGER = RUNS / "feedback-correction-ledger.jsonl"
+FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
+REGRESSION_RECHECKS = RUNS / "regression-rechecks"
 CLOSED_LOOP_LEDGER = RUNS / "closed-loop-clean.jsonl"
+ClOSED_LOOP_STATUS = RUNS / "closed-loop-status.json"
+FEEDBACK_CORRECTION_STATUS = RUNS / "feedback-correction-status.json"
 DASHBOARD_HISTORY = RUNS / "dashboard-validation-history.jsonl"
 
 
@@ -46,6 +51,71 @@ def read_jsonl(path: Path) -> list[dict]:
 def append_jsonl(path: Path, item: dict) -> None:
     with path.open("a") as handle:
         handle.write(json.dumps(item) + "\n")
+
+
+def latest_dir_events(root: Path, limit: int = 8) -> list[dict]:
+    dirs = [path for path in root.iterdir() if path.is_dir()] if root.exists() else []
+    if not dirs:
+        return []
+    latest = max(dirs, key=lambda path: path.name)
+    out = []
+    for event in read_jsonl(latest / "events.jsonl")[-limit:]:
+        out.append({
+            "at": event.get("at"),
+            "source": latest.name,
+            "kind": event.get("type") or "event",
+            "message": event.get("message") or "",
+        })
+    return out
+
+
+def live_log_for_case(item: dict, selected_case: str | None) -> list[dict]:
+    case_id = item.get("id")
+    should_stream = item.get("status") == "fail" or item.get("active") or selected_case == case_id
+    if not should_stream:
+        return []
+    out = []
+    closed_loop = read_json(ClOSED_LOOP_STATUS, {})
+    if closed_loop:
+        out.append({
+            "at": closed_loop.get("updated_at") or now(),
+            "source": closed_loop.get("agent") or "closed-loop-orchestrator",
+            "kind": closed_loop.get("stage") or "closed-loop",
+            "message": closed_loop.get("message") or "closed-loop status heartbeat",
+        })
+    feedback_status = read_json(FEEDBACK_CORRECTION_STATUS, {})
+    if feedback_status:
+        out.append({
+            "at": feedback_status.get("updated_at") or feedback_status.get("at") or now(),
+            "source": feedback_status.get("agent") or "feedback-correction-agent",
+            "kind": "feedback-correction",
+            "message": f"{feedback_status.get('status') or 'unknown'}; processed={feedback_status.get('processed', feedback_status.get('pending', 0))}",
+        })
+    for event in latest_dir_events(VALIDATIONS, 8):
+        out.append(event)
+    for event in latest_dir_events(REGRESSION_RECHECKS, 8):
+        out.append(event)
+    for event in read_jsonl(FEEDBACK_PROCESSING)[-8:]:
+        out.append({
+            "at": event.get("at"),
+            "source": "feedback-processing",
+            "kind": event.get("kind") or "feedback",
+            "message": event.get("title") or event.get("value") or event.get("prior_note") or "",
+        })
+    for event in read_jsonl(CLOSED_LOOP_LEDGER)[-5:]:
+        out.append({
+            "at": event.get("at"),
+            "source": "closed-loop-ledger",
+            "kind": event.get("status") or "ledger",
+            "message": f"iteration {event.get('iteration', '?')}: anomalies={event.get('anomaly_count', '?')}; readback mismatches={(event.get('readback') or {}).get('mismatch_count', '?')}",
+        })
+    out.append({
+        "at": now(),
+        "source": "software-validation-poll",
+        "kind": "heartbeat",
+        "message": f"watching {case_id}; status={item.get('status')}; active={bool(item.get('active'))}",
+    })
+    return sorted(out, key=lambda entry: str(entry.get("at") or ""))[-18:]
 
 
 def feedback_id(item: dict) -> str:
@@ -107,6 +177,26 @@ def check_docx_review() -> list[dict]:
     return checks
 
 
+def check_anode_count_guard() -> dict:
+    payload = docx_review.build_payload()
+    bad = []
+    for structure in payload.get("structures") or []:
+        for slot in structure.get("slots") or []:
+            if slot.get("status") == "derived_mismatch" and slot.get("label", "").startswith("Anodes TS"):
+                bad.append({
+                    "structure": structure.get("structure"),
+                    "run_id": structure.get("run_id"),
+                    "label": slot.get("label"),
+                    "actual": slot.get("actual"),
+                    "derived_expected": slot.get("derived_expected"),
+                    "writer_expected": slot.get("writer_expected"),
+                    "notes": slot.get("notes"),
+                })
+    if bad:
+        return case("docx-anode-count-derived-from-mg", "DOCX anode counts must derive from filled MG rows", "fail", f"{len(bad)} anode count cell(s) disagree with occupied Table 5 MG slots", severity="high", active=True, evidence=bad[:8])
+    return case("docx-anode-count-derived-from-mg", "DOCX anode counts must derive from filled MG rows", "pass", "Table 4 anode count cells agree with filled Table 5 MG rows", severity="high")
+
+
 def check_closed_loop_integrity() -> list[dict]:
     entries = read_jsonl(CLOSED_LOOP_LEDGER)
     bad_clean = [
@@ -133,25 +223,59 @@ def monitored_bug_cases() -> list[dict]:
         case("meter-orientation-generalized", "Upside-down/rotated seven-segment meter errors must be reusable", "pass" if has_orientation_case and orientation else "fail", orientation or "meter-orientation validator or regression case missing", severity="high", active=not (has_orientation_case and orientation), evidence=[{"has_orientation_case": has_orientation_case, "validator": orientation}]),
         case("feedback-never-silent-fail", "Feedback correction failures must be visible, never silent", "fail" if feedback_failures else "pass", f"{len(feedback_failures)} feedback correction failure(s)" if feedback_failures else "no silent/failed feedback corrections", severity="high", active=bool(feedback_failures), evidence=feedback_failures[-5:]),
         case("potential-sign-raw-vs-blocking-display", "Potential sign raw flags must not look like current red failures", "monitor", potential or "waiting for validation", severity="medium", evidence=[{"latest_validation": validation.get("validation_id"), "message": potential}]),
-        case("dashboard-scroll-stability", "Dashboard panels must preserve scroll/input while polling", "monitor", "tracked from prior validation/feedback panel scroll-reset bugs", severity="medium"),
+        case("software-scroll-stability", "Software panels must preserve scroll/input while polling", "monitor", "tracked from prior validation/DOCX/software-validation panel scroll-reset bugs", severity="medium"),
         case("hover-preview-stability", "Evidence hover previews must stay near anchor and not disappear during scroll", "monitor", "tracked from prior validation hover-preview bugs", severity="medium"),
         case("single-source-final-docx", "Only active final DOCX should be written/opened", "pass", "report-source-of-truth and DOCX review use the active final DOCX", severity="high"),
     ]
 
 
+def attach_feedback(checks: list[dict]) -> list[dict]:
+    feedback = read_jsonl(SOFTWARE_VALIDATION_FEEDBACK)
+    by_case: dict[str, list[dict]] = {}
+    for item in feedback:
+        by_case.setdefault(str(item.get("case_id") or ""), []).append(item)
+    for item in checks:
+        item["feedback"] = by_case.get(item["id"], [])[-8:]
+    return checks
+
+
+def guarded(label: str, fn):
+    try:
+        return fn()
+    except Exception as exc:
+        return case(
+            f"software-validation-runtime-{label}",
+            f"Software validation check failed: {label}",
+            "fail",
+            f"{type(exc).__name__}: {exc}",
+            severity="high",
+            active=True,
+            evidence=[{"error": str(exc), "check": label}],
+        )
+
+
 def build_payload(selected_case: str | None = None, record: bool = False) -> dict:
-    checks = [
-        check_feedback_corrections(),
-        *check_docx_review(),
-        *check_closed_loop_integrity(),
-        *monitored_bug_cases(),
-    ]
+    checks = []
+    for result in [
+        guarded("feedback-corrections", check_feedback_corrections),
+        guarded("docx-review", check_docx_review),
+        guarded("anode-count", check_anode_count_guard),
+        guarded("closed-loop", check_closed_loop_integrity),
+        guarded("monitored-bugs", monitored_bug_cases),
+    ]:
+        if isinstance(result, list):
+            checks.extend(result)
+        else:
+            checks.append(result)
+    checks = attach_feedback(checks)
     order = {"fail": 0, "monitor": 1, "pass": 2}
     if selected_case:
         for item in checks:
             if item["id"] == selected_case:
                 item["active"] = True
                 item["detail"] = f"Replay requested. {item['detail']}"
+    for item in checks:
+        item["live_log"] = live_log_for_case(item, selected_case)
     checks.sort(key=lambda item: (order.get(item["status"], 1), not item.get("active"), item["id"]))
     payload = {
         "updated_at": now(),

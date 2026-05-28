@@ -30,7 +30,11 @@ let activityUpdatedAt = null;
 let latestValidation = null;
 let latestDocxReview = null;
 let latestDashboardValidation = null;
+let activeSoftwareValidationCase = "";
 const docxOpenStructures = new Set();
+const softwareValidationDrafts = new Map();
+const docxReviewDrafts = new Map();
+let docxReviewFilter = "";
 let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
@@ -639,7 +643,7 @@ function scrollablePanelBusy() {
   return Date.now() < scrollablePanelQuietUntil
     || Date.now() < validationEditLockUntil
     || anomalyNoteDrafts.size > 0
-    || Boolean(document.querySelector("#solutionSuite:hover, #solutionSuite:focus-within"))
+    || Boolean(document.querySelector("#solutionSuite:hover, #solutionSuite:focus-within, #docxReviewPanel:hover, #docxReviewPanel:focus-within, #dashboardValidationPanel:hover, #dashboardValidationPanel:focus-within, #validationPanel:hover, #validationPanel:focus-within"))
     || editingDashboardPanel();
 }
 
@@ -665,7 +669,7 @@ function rememberAnomalyDraft(input) {
 function markScrollablePanelBusy(event) {
   const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #dashboardValidationPanel .dashboard-validation-list, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
   if (!target) return;
-  const quietMs = target.closest("#solutionSuite .solution-list") ? 6000 : 1600;
+  const quietMs = target.closest("#solutionSuite .solution-list, #docxReviewPanel, #dashboardValidationPanel, #validationPanel") ? 6000 : 2600;
   scrollablePanelQuietUntil = Date.now() + quietMs;
 }
 
@@ -1018,7 +1022,7 @@ async function pollValidation() {
 }
 
 function docxStatusClass(status) {
-  if (["missing_write", "mismatch", "patch_error", "needs_attention"].includes(status)) return "bad";
+  if (["missing_write", "mismatch", "patch_error", "derived_mismatch", "needs_attention"].includes(status)) return "bad";
   if (["blank", "partial_or_blank"].includes(status)) return "blank";
   if (["matched", "complete"].includes(status)) return "ok";
   if (["docx_only"].includes(status)) return "docx-only";
@@ -1026,7 +1030,7 @@ function docxStatusClass(status) {
 }
 
 function docxReviewLine(summary = {}) {
-  return `${Number(summary.filled || 0)}/${Number(summary.total || 0)} filled · ${Number(summary.blank || 0)} blank · ${Number(summary.mismatch || 0) + Number(summary.missing_write || 0) + Number(summary.patch_error || 0)} blocking`;
+  return `${Number(summary.filled || 0)}/${Number(summary.total || 0)} filled · ${Number(summary.blank || 0)} blank · ${Number(summary.mismatch || 0) + Number(summary.missing_write || 0) + Number(summary.patch_error || 0) + Number(summary.derived_mismatch || 0)} blocking`;
 }
 
 function groupDocxSlots(slots = []) {
@@ -1039,19 +1043,137 @@ function groupDocxSlots(slots = []) {
   return [...groups.entries()].map(([title, items]) => ({ title, items }));
 }
 
-function renderDocxCell(slot) {
+function imageLike(value) {
+  return /\.(jpe?g|png|heic)$/i.test(String(value || ""));
+}
+
+function docxContextGroups(slots = []) {
+  const groups = new Map();
+  for (const slot of slots) {
+    const sources = [slot.source_ref, ...(slot.source_refs || [])].filter(imageLike);
+    if (!sources.length) continue;
+    const title = slot.group || slot.table_key || "DOCX evidence";
+    if (!groups.has(title)) groups.set(title, new Set());
+    for (const source of sources) groups.get(title).add(source);
+  }
+  return [...groups.entries()].map(([title, sources]) => ({ title, sources: [...sources], agent: title }));
+}
+
+function docxSlotKey(structure, slot) {
+  return slot.feedback_key || [structure, slot.table_key || "", slot.label || "", slot.row_index || "", slot.col_index || ""].join("|");
+}
+
+function docxRiskForSlot(slot) {
+  const status = slot.status || "blank";
+  if (["missing_write", "mismatch", "patch_error", "derived_mismatch"].includes(status)) return "blocking";
+  if (["blank", "not_started"].includes(status)) return "low_blank";
+  if (status === "docx_only") return "docx_only";
+  if (status === "matched") return "matched";
+  return "other";
+}
+
+function docxRiskSummary(structures = []) {
+  const counts = { blocking: 0, low_blank: 0, docx_only: 0, matched: 0, other: 0 };
+  for (const item of structures) {
+    for (const slot of item.slots || []) counts[docxRiskForSlot(slot)] += 1;
+  }
+  return counts;
+}
+
+function renderDocxRiskControls(structures = []) {
+  const counts = docxRiskSummary(structures);
+  const rows = [
+    ["blocking", "Danger", "write/readback mismatches", "bad"],
+    ["low_blank", "Low-risk partial blank", "blank/not-started slots", "blank"],
+    ["docx_only", "DOCX-only", "manual/unexpected content", "docx-only"],
+    ["matched", "Matched", "expected cells correct", "ok"],
+  ];
+  return `<div class="docx-risk-controls">
+    ${rows.map(([filter, label, hint, clsName]) => `<button class="docx-risk-filter ${escapeHtml(clsName)} ${docxReviewFilter === filter ? "active" : ""}" data-filter="${escapeHtml(filter)}" type="button">
+      <span>${escapeHtml(label)}</span>
+      <strong>${Number(counts[filter] || 0)}</strong>
+      <small>${escapeHtml(hint)}</small>
+    </button>`).join("")}
+    <button class="docx-risk-filter idle ${docxReviewFilter === "" ? "active" : ""}" data-filter="" type="button">
+      <span>All</span><strong>${Object.values(counts).reduce((a, b) => a + b, 0)}</strong><small>clear review list filter</small>
+    </button>
+  </div>`;
+}
+
+function renderDocxCell(slot, structureItem, contextGroups = []) {
   const actual = String(slot.actual || "").trim();
   const expected = String(slot.expected || "").trim();
   const status = slot.status || "blank";
+  const structure = String(structureItem?.structure || "");
+  const folder = knownStructures.find((entry) => String(entry.structure) === structure)?.folder || "";
+  const sources = [slot.source_ref, ...(slot.source_refs || [])].filter(imageLike);
+  const image = sources[0] || "";
+  const previewHref = folder && image ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(image)}?size=760` : "";
+  const neighborhood = folder && image ? `/api/image-neighborhood?folder=${encodeURIComponent(folder)}&image=${encodeURIComponent(image)}&limit=21` : "";
+  const previewTitle = `STR ${structure || "?"} · ${slot.group || slot.table_key || "DOCX"} · ${slot.label || "cell"} · ${actual || "blank"}`;
+  const groups = contextGroups.map((group) => ({ ...group, current: (group.sources || []).some((source) => sources.includes(source)) }));
+  const slotKey = docxSlotKey(structure, slot);
+  const feedback = slot.feedback || [];
+  const reviewed = feedback.some((item) => ["good", "reviewed", "ok"].includes(String(item.status || "").toLowerCase()));
+  const draft = docxReviewDrafts.has(slotKey) ? docxReviewDrafts.get(slotKey) : "";
   const meta = [
     expected ? `expected ${expected}` : "no extracted value",
+    slot.derived_expected ? `derived ${slot.derived_expected}` : "",
+    slot.writer_expected ? `writer expected ${slot.writer_expected}` : "",
     slot.source_ref ? `source ${slot.source_ref}` : "",
     slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
   ].filter(Boolean).join(" · ");
-  return `<div class="docx-cell ${docxStatusClass(status)}" title="${escapeHtml(meta)}">
+  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""}" title="${escapeHtml(meta)}"
+    data-slot-key="${escapeHtml(slotKey)}"
+    data-structure="${escapeHtml(structure)}"
+    data-table-key="${escapeHtml(slot.table_key || "")}"
+    data-label="${escapeHtml(slot.label || "")}"
+    data-cell-status="${escapeHtml(status)}"
+    data-actual="${escapeHtml(actual)}"
+    data-expected="${escapeHtml(expected)}"
+    data-preview-src="${escapeHtml(previewHref)}"
+    data-preview-title="${escapeHtml(previewTitle)}"
+    data-neighborhood="${escapeHtml(neighborhood)}"
+    data-context-groups="${escapeHtml(JSON.stringify(groups))}">
     <span>${escapeHtml(slot.label || "cell")}</span>
     <strong>${escapeHtml(actual || "blank")}</strong>
     <small>${escapeHtml(status.replaceAll("_", " "))}${expected && actual !== expected ? ` · should be ${escapeHtml(expected)}` : ""}</small>
+    <div class="docx-cell-actions">
+      <button class="docx-good small-btn" type="button">Good TY</button>
+      <button class="docx-toggle-review small-btn" type="button">Review</button>
+    </div>
+    <div class="docx-cell-feedback">
+      <textarea class="docx-review-input" rows="2" placeholder="Review this DOCX cell">${escapeHtml(draft)}</textarea>
+      <button class="save-docx-review small-btn" type="button">Save review</button>
+    </div>
+    ${feedback.length ? `<div class="docx-feedback-history">${feedback.slice().reverse().map((entry) => `<div><b>${escapeHtml(entry.status || "reviewed")}</b><span>${escapeHtml(entry.feedback || "")}</span></div>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+function renderDocxFilterResults(structures = []) {
+  if (!docxReviewFilter) return "";
+  const label = {
+    blocking: "Danger cells",
+    low_blank: "Low-risk partial blank cells",
+    docx_only: "DOCX-only cells",
+    matched: "Matched cells",
+  }[docxReviewFilter] || "Filtered cells";
+  const blocks = [];
+  for (const item of structures) {
+    const slots = (item.slots || []).filter((slot) => docxRiskForSlot(slot) === docxReviewFilter);
+    if (!slots.length) continue;
+    const contextGroups = docxContextGroups(item.slots || []);
+    blocks.push(`<section class="docx-filter-block">
+      <div class="docx-table-head"><strong>STR ${escapeHtml(item.structure || "?")} · ${escapeHtml(label)}</strong><span>${slots.length} cell${slots.length === 1 ? "" : "s"}</span></div>
+      <div class="docx-cell-grid">${slots.map((slot) => renderDocxCell(slot, item, contextGroups)).join("")}</div>
+    </section>`);
+  }
+  return `<div class="docx-filter-results">
+    <div class="docx-filter-head">
+      <strong>${escapeHtml(label)}</strong>
+      <button class="small-btn docx-clear-filter" type="button">Clear</button>
+    </div>
+    ${blocks.join("") || `<div class="message">No cells in this review bucket.</div>`}
   </div>`;
 }
 
@@ -1060,6 +1182,7 @@ function renderDocxStructure(item, index) {
   const summary = item.summary || {};
   const shouldOpen = docxOpenStructures.has(structure) || (!docxOpenStructures.size && index < 1 && item.status !== "complete");
   const groups = groupDocxSlots(item.slots || []);
+  const contextGroups = docxContextGroups(item.slots || []);
   return `<details class="docx-structure ${docxStatusClass(item.status)}" data-structure="${escapeHtml(structure)}" ${shouldOpen ? "open" : ""}>
     <summary>
       <div>
@@ -1078,7 +1201,7 @@ function renderDocxStructure(item, index) {
     <div class="docx-table-list">
       ${groups.map((group) => `<section class="docx-table-block">
         <div class="docx-table-head"><strong>${escapeHtml(group.title)}</strong><span>${Number(group.items.filter((slot) => String(slot.actual || "").trim()).length)}/${group.items.length} filled</span></div>
-        <div class="docx-cell-grid">${group.items.map(renderDocxCell).join("")}</div>
+        <div class="docx-cell-grid">${group.items.map((slot) => renderDocxCell(slot, item, contextGroups)).join("")}</div>
       </section>`).join("")}
     </div>
   </details>`;
@@ -1109,10 +1232,12 @@ function renderDocxReview(payload) {
     <div class="stat-card"><span>Blanks</span><strong>${Number(summary.blank || 0)}</strong><small>visible empty slots</small></div>
     <div class="stat-card"><span>Blocking</span><strong>${Number(summary.problem || 0)}</strong><small>missing write / mismatch / patch issue</small></div>
   </div>
+  ${renderDocxRiskControls(structures)}
   <div class="validation-note">This panel reads the final DOCX file and compares it against the same cell patches used by the DOCX writer. If Word saves a manual change, the next refresh reflects the saved document state.</div>
   <div class="docx-legend">
-    <mark class="ok">matched</mark><mark class="blank">blank</mark><mark class="bad">blocking</mark><mark class="docx-only">docx-only</mark><mark class="idle">not started</mark>
+    <mark class="ok">matched</mark><mark class="blank">blank</mark><mark class="bad">blocking / derived mismatch</mark><mark class="docx-only">docx-only</mark><mark class="idle">not started</mark>
   </div>
+  ${renderDocxFilterResults(structures)}
   <div class="docx-structure-list">${structures.map(renderDocxStructure).join("") || `<div class="message">No DOCX targets known yet.</div>`}</div>`;
   restoreScrollPositions(scrollSnapshot);
 }
@@ -1133,6 +1258,9 @@ function dashboardValidationClass(status) {
 
 function renderDashboardValidationCase(item) {
   const statusClass = dashboardValidationClass(item.status);
+  const draft = softwareValidationDrafts.has(item.id) ? softwareValidationDrafts.get(item.id) : "";
+  const feedback = item.feedback || [];
+  const liveLog = item.live_log || [];
   const evidence = item.evidence?.length
     ? `<details><summary>evidence</summary><pre>${escapeHtml(JSON.stringify(item.evidence.slice(0, 3), null, 2))}</pre></details>`
     : "";
@@ -1150,15 +1278,32 @@ function renderDashboardValidationCase(item) {
     </div>
     <p>${escapeHtml(item.detail || "")}</p>
     <div class="dashboard-validation-actions">
-      <button class="small-btn replay-dashboard-case" data-case-id="${escapeHtml(item.id || "")}" type="button">Play check</button>
+      <button class="small-btn replay-dashboard-case" data-case-id="${escapeHtml(item.id || "")}" type="button">Play / pin live</button>
       <span>${escapeHtml(item.updated_at ? timeAgo(item.updated_at) : "")}</span>
     </div>
+    ${(item.status === "fail" || item.active || activeSoftwareValidationCase === item.id) ? `<div class="software-live-log">
+      <div class="software-live-head">
+        <strong>${escapeHtml(item.active || activeSoftwareValidationCase === item.id ? "Live work log" : "Failure monitor log")}</strong>
+        <span>refreshes every 2s</span>
+      </div>
+      <div class="software-live-rows">${liveLog.length ? liveLog.slice().reverse().map((entry) => `<div class="software-live-row ${escapeHtml(entry.kind || "")}">
+        <span>${escapeHtml(fmtTime(entry.at))}</span>
+        <strong>${escapeHtml(entry.source || "system")}</strong>
+        <mark>${escapeHtml(entry.kind || "event")}</mark>
+        <em>${escapeHtml(entry.message || "")}</em>
+      </div>`).join("") : `<div class="message">No backend movement attached yet. Press Play / pin live to keep this case active while work starts.</div>`}</div>
+    </div>` : ""}
+    <div class="software-validation-feedback">
+      <textarea class="software-validation-feedback-input" rows="2" data-case-id="${escapeHtml(item.id || "")}" placeholder="Give feedback for this software validation case">${escapeHtml(draft)}</textarea>
+      <button class="small-btn save-software-validation-feedback" data-case-id="${escapeHtml(item.id || "")}" type="button">Save feedback</button>
+      <small>Saved to software-validation feedback; used by future dashboard/pipeline fix loops.</small>
+    </div>
+    ${feedback.length ? `<div class="software-validation-feedback-history">${feedback.slice().reverse().map((entry) => `<div><strong>${escapeHtml(fmtTime(entry.at))}</strong><span>${escapeHtml(entry.feedback || "")}</span></div>`).join("")}</div>` : ""}
     ${evidence}
   </article>`;
 }
 
 function renderDashboardValidation(payload) {
-  latestDashboardValidation = payload;
   const panel = $("dashboardValidationPanel");
   if (!panel) return;
   if (scrollablePanelBusy() && panel.innerHTML.trim()) {
@@ -1166,8 +1311,26 @@ function renderDashboardValidation(payload) {
     return;
   }
   const scrollSnapshot = dashboardScrollSnapshot();
-  const summary = payload?.summary || {};
-  const cases = payload?.cases || [];
+  const failed = !payload || payload.status === "failed";
+  const fallbackCase = failed ? [{
+    id: "software-validation-ui-empty-guard",
+    title: "Software Validation Set did not return renderable content",
+    status: "fail",
+    severity: "high",
+    active: true,
+    detail: payload?.error || "No software validation payload was returned. This card prevents silent empty-state failure.",
+    evidence: [],
+    feedback: [],
+    updated_at: new Date().toISOString(),
+  }] : [];
+  const cases = (payload?.cases?.length ? payload.cases : fallbackCase);
+  const summary = payload?.summary || {
+    fail: cases.filter((item) => item.status === "fail").length,
+    monitor: cases.filter((item) => item.status === "monitor").length,
+    pass: cases.filter((item) => item.status === "pass").length,
+    active: cases.filter((item) => item.active).length,
+  };
+  latestDashboardValidation = { ...(payload || {}), cases, summary };
   const status = $("dashboardValidationStatus");
   if (status) status.textContent = `${Number(summary.fail || 0)} failing · ${Number(summary.monitor || 0)} monitor · ${Number(summary.pass || 0)} passing`;
   panel.innerHTML = `<div class="dashboard-validation-summary">
@@ -1176,14 +1339,15 @@ function renderDashboardValidation(payload) {
     <div class="stat-card"><span>Passing</span><strong>${Number(summary.pass || 0)}</strong><small>regression checks</small></div>
     <div class="stat-card"><span>Active</span><strong>${Number(summary.active || 0)}</strong><small>currently being replayed/worked</small></div>
   </div>
-  <div class="validation-note">Software validation set for this dashboard/pipeline. Product bugs we identify become replayable checks here; failing and active checks are pinned to the top.</div>
-  <div class="dashboard-validation-list">${cases.map(renderDashboardValidationCase).join("") || `<div class="message">No dashboard validation cases yet.</div>`}</div>`;
+  <div class="validation-note">Software Validation Set for this dashboard/pipeline. Product bugs we identify become replayable checks here; failing and active checks are pinned to the top.</div>
+  <div class="dashboard-validation-list">${cases.map(renderDashboardValidationCase).join("") || `<div class="message">No software validation cases yet.</div>`}</div>`;
   restoreScrollPositions(scrollSnapshot);
 }
 
 async function pollDashboardValidation(caseId = "", record = false) {
   try {
     const query = new URLSearchParams();
+    if (!caseId && activeSoftwareValidationCase) caseId = activeSoftwareValidationCase;
     if (caseId) query.set("case", caseId);
     if (record) query.set("record", "1");
     const url = `/api/dashboard-validation${query.toString() ? `?${query}` : ""}`;
@@ -1686,6 +1850,67 @@ async function saveSolutionFeedback(button) {
   if (res.ok && textarea) textarea.value = "";
   setTimeout(() => { button.textContent = "Save guidance"; }, 1200);
   pollRegressionSolutions();
+  pollFeedbackStatus();
+}
+
+async function saveSoftwareValidationFeedback(button) {
+  const card = button.closest(".dashboard-validation-case");
+  const input = card?.querySelector(".software-validation-feedback-input");
+  const feedback = input?.value?.trim() || "";
+  if (!feedback) return;
+  button.disabled = true;
+  button.textContent = "Saving";
+  const res = await fetch("/api/software-validation/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      case_id: button.dataset.caseId,
+      feedback,
+    }),
+  });
+  button.disabled = false;
+  button.textContent = res.ok ? "Saved" : "Save failed";
+  if (res.ok && input) {
+    softwareValidationDrafts.delete(button.dataset.caseId || "");
+    input.value = "";
+  }
+  setTimeout(() => { button.textContent = "Save feedback"; }, 1200);
+  pollDashboardValidation();
+  pollFeedbackStatus();
+}
+
+async function saveDocxReviewFeedback(button, status = "reviewed", fallbackText = "") {
+  const cell = button.closest(".docx-cell");
+  if (!cell) return;
+  const input = cell.querySelector(".docx-review-input");
+  const feedback = (fallbackText || input?.value || "").trim();
+  if (!feedback) return;
+  button.disabled = true;
+  button.textContent = "Saving";
+  const res = await fetch("/api/docx-review/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      slot_key: cell.dataset.slotKey,
+      status,
+      feedback,
+      structure: cell.dataset.structure,
+      table_key: cell.dataset.tableKey,
+      label: cell.dataset.label,
+      cell_status: cell.dataset.cellStatus,
+      actual: cell.dataset.actual,
+      expected: cell.dataset.expected,
+    }),
+  });
+  button.disabled = false;
+  button.textContent = res.ok ? "Saved" : "Save failed";
+  if (res.ok) {
+    cell.classList.add("reviewed");
+    docxReviewDrafts.delete(cell.dataset.slotKey || "");
+    if (input) input.value = "";
+  }
+  setTimeout(() => { button.textContent = button.classList.contains("docx-good") ? "Good TY" : "Save review"; }, 1200);
+  pollDocxReview();
   pollFeedbackStatus();
 }
 
@@ -2224,18 +2449,54 @@ document.addEventListener("click", (event) => {
   const solutionFeedback = event.target.closest(".save-solution-feedback");
   if (solutionFeedback) saveSolutionFeedback(solutionFeedback);
   const replayDashboard = event.target.closest(".replay-dashboard-case");
-  if (replayDashboard) pollDashboardValidation(replayDashboard.dataset.caseId || "", true);
+  if (replayDashboard) {
+    activeSoftwareValidationCase = replayDashboard.dataset.caseId || "";
+    pollDashboardValidation(activeSoftwareValidationCase, true);
+  }
+  const softwareFeedback = event.target.closest(".save-software-validation-feedback");
+  if (softwareFeedback) saveSoftwareValidationFeedback(softwareFeedback);
+  const docxFilter = event.target.closest(".docx-risk-filter");
+  if (docxFilter) {
+    docxReviewFilter = docxFilter.dataset.filter || "";
+    renderDocxReview(latestDocxReview);
+  }
+  const clearDocxFilter = event.target.closest(".docx-clear-filter");
+  if (clearDocxFilter) {
+    docxReviewFilter = "";
+    renderDocxReview(latestDocxReview);
+  }
+  const docxToggle = event.target.closest(".docx-toggle-review");
+  if (docxToggle) docxToggle.closest(".docx-cell")?.classList.toggle("review-open");
+  const docxGood = event.target.closest(".docx-good");
+  if (docxGood) saveDocxReviewFeedback(docxGood, "good", "Good TY");
+  const docxSave = event.target.closest(".save-docx-review");
+  if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
 document.addEventListener("input", (event) => {
   const input = event.target.closest(".anomaly-note-input");
+  const softwareInput = event.target.closest(".software-validation-feedback-input");
+  const docxInput = event.target.closest(".docx-review-input");
+  if (docxInput) {
+    const key = docxInput.closest(".docx-cell")?.dataset.slotKey || "";
+    if (docxInput.value) docxReviewDrafts.set(key, docxInput.value);
+    else docxReviewDrafts.delete(key);
+    lockValidationEditing();
+    return;
+  }
+  if (softwareInput) {
+    if (softwareInput.value) softwareValidationDrafts.set(softwareInput.dataset.caseId || "", softwareInput.value);
+    else softwareValidationDrafts.delete(softwareInput.dataset.caseId || "");
+    lockValidationEditing();
+    return;
+  }
   if (!input) return;
   rememberAnomalyDraft(input);
   lockValidationEditing();
 });
 document.addEventListener("focusin", (event) => {
-  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
+  if (event.target.closest?.(".anomaly-note-input, .software-validation-feedback-input, .docx-review-input")) lockValidationEditing();
 });
 document.addEventListener("focusout", (event) => {
   const input = event.target.closest?.(".anomaly-note-input");
@@ -2244,7 +2505,7 @@ document.addEventListener("focusout", (event) => {
   validationEditLockUntil = Math.max(validationEditLockUntil, Date.now() + 5000);
 });
 document.addEventListener("paste", (event) => {
-  const input = event.target.closest?.(".anomaly-note-input");
+  const input = event.target.closest?.(".anomaly-note-input, .software-validation-feedback-input, .docx-review-input");
   if (!input) return;
   lockValidationEditing();
   setTimeout(() => {
@@ -2253,10 +2514,10 @@ document.addEventListener("paste", (event) => {
   }, 0);
 }, true);
 document.addEventListener("beforeinput", (event) => {
-  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
+  if (event.target.closest?.(".anomaly-note-input, .software-validation-feedback-input, .docx-review-input")) lockValidationEditing();
 }, true);
 document.addEventListener("keydown", (event) => {
-  if (event.target.closest?.(".anomaly-note-input")) lockValidationEditing();
+  if (event.target.closest?.(".anomaly-note-input, .software-validation-feedback-input, .docx-review-input")) lockValidationEditing();
   const quick = event.target.closest(".quick-feedback textarea");
   if (quick) {
     if (event.key === "Escape") {
@@ -2419,10 +2680,11 @@ function showAnomalyFloatingPreview(chip, event) {
 function handlePreviewHover(event) {
   const chip = event.target.closest(".reading-chip");
   const anomalyChip = event.target.closest(".anomaly-chip");
-  if (anomalyChip) cancelFloatingPreviewHide();
-  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip, event) : event.target.closest(".hover-preview");
+  const docxChip = event.target.closest(".docx-cell.has-preview");
+  if (anomalyChip || docxChip) cancelFloatingPreviewHide();
+  const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip, event) : docxChip ? showAnomalyFloatingPreview(docxChip, event) : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
-  if (leaf || chip || preview || anomalyChip) deferRenderUntil = Date.now() + 1800;
+  if (leaf || chip || preview || anomalyChip || docxChip) deferRenderUntil = Date.now() + 1800;
   hydrateHoverPreview(preview);
 }
 
@@ -2435,7 +2697,7 @@ document.addEventListener("mousemove", (event) => {
 document.addEventListener("mouseout", (event) => {
   if (!activeFloatingPreview) return;
   const next = event.relatedTarget;
-  if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".floating-preview"))) return;
+  if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".docx-cell.has-preview") || next.closest?.(".floating-preview"))) return;
   scheduleFloatingPreviewHide();
 });
 window.addEventListener("resize", hideFloatingPreview, { passive: true });
@@ -2452,7 +2714,7 @@ setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollDocxReview, 3000);
-setInterval(() => pollDashboardValidation(), 4000);
+setInterval(() => pollDashboardValidation(), 2000);
 setInterval(pollFeedbackStatus, 3500);
 setInterval(pollRegressionSolutions, 1000);
 setInterval(pollRegressionLedger, 3500);

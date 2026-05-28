@@ -16,11 +16,13 @@ const VALIDATION_REVIEW_METADATA = path.join(RUNS, "validation-review-metadata.j
 const FEEDBACK_PROCESSING = path.join(RUNS, "feedback-processing.jsonl");
 const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
 const SOLUTION_FEEDBACK = path.join(RUNS, "solution-feedback.jsonl");
+const SOFTWARE_VALIDATION_FEEDBACK = path.join(RUNS, "software-validation-feedback.jsonl");
 const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const CORRECTION_PROMOTIONS = path.join(RUNS, "correction-promotions.jsonl");
 const CLOSED_LOOP_LEDGER = path.join(RUNS, "closed-loop-clean.jsonl");
 const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
 const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.json");
+const DOCX_REVIEW_FEEDBACK = path.join(RUNS, "docx-review-feedback.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
@@ -209,8 +211,18 @@ function dashboardValidationPayload(url) {
       updated_at: new Date().toISOString(),
       status: "failed",
       error: result.stderr || result.stdout || `dashboard_validation.py exited ${result.status}`,
-      summary: {},
-      cases: [],
+      summary: { total: 1, fail: 1, monitor: 0, pass: 0, active: 1 },
+      cases: [{
+        id: "software-validation-runtime-failed",
+        title: "Software Validation Set failed to render",
+        status: "fail",
+        severity: "high",
+        active: true,
+        detail: result.stderr || result.stdout || `dashboard_validation.py exited ${result.status}`,
+        evidence: [],
+        feedback: [],
+        updated_at: new Date().toISOString(),
+      }],
     };
   }
   return JSON.parse(result.stdout || "{}");
@@ -771,6 +783,62 @@ async function saveSolutionFeedback(req, res) {
     solution_id: solutionId,
     value: item.feedback,
   }) + "\n");
+  json(res, 200, { ok: true, item });
+}
+
+async function saveSoftwareValidationFeedback(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const caseId = String(payload.case_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const feedback = String(payload.feedback || "").trim();
+  if (!caseId) return json(res, 400, { error: "missing case_id" });
+  if (!feedback) return json(res, 400, { error: "empty feedback" });
+  const item = {
+    at: new Date().toISOString(),
+    case_id: caseId,
+    status: "active",
+    feedback,
+    source: "software_validation_set",
+  };
+  fs.appendFileSync(SOFTWARE_VALIDATION_FEEDBACK, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: "software_validation_feedback_saved",
+    case_id: caseId,
+    value: feedback,
+  }) + "\n");
+  json(res, 200, { ok: true, item });
+}
+
+async function saveDocxReviewFeedback(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const slotKey = String(payload.slot_key || "").slice(0, 500);
+  const feedback = String(payload.feedback || "").trim();
+  const status = String(payload.status || "reviewed").replace(/[^a-zA-Z0-9_.-]/g, "");
+  if (!slotKey) return json(res, 400, { error: "missing slot_key" });
+  if (!feedback) return json(res, 400, { error: "empty feedback" });
+  const item = {
+    at: new Date().toISOString(),
+    slot_key: slotKey,
+    status: status || "reviewed",
+    feedback,
+    structure: payload.structure || null,
+    table_key: payload.table_key || null,
+    label: payload.label || null,
+    cell_status: payload.cell_status || null,
+    actual: payload.actual || "",
+    expected: payload.expected || "",
+    source: "docx_review",
+  };
+  fs.appendFileSync(DOCX_REVIEW_FEEDBACK, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: "docx_review_feedback_saved",
+    structure: item.structure,
+    title: `${item.table_key || "docx"} ${item.label || ""}`.trim(),
+    status: item.status,
+    value: item.feedback,
+  }) + "\n");
+  docxReviewCache = { key: "", at: 0, payload: null };
   json(res, 200, { ok: true, item });
 }
 
@@ -1539,7 +1607,9 @@ async function api(req, res, url) {
   if (url.pathname === "/api/report/source-of-truth") return json(res, 200, reportSourceOfTruth());
   if (url.pathname === "/api/report/open-final") return openFinalReport(res);
   if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
+  if (url.pathname === "/api/docx-review/feedback") return saveDocxReviewFeedback(req, res);
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
+  if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
   if (url.pathname === "/api/stats") return json(res, 200, stats());
   if (url.pathname === "/api/activity") return json(res, 200, { updated_at: new Date().toISOString(), ...activityFeed() });
   if (url.pathname === "/api/validation") return json(res, 200, validationPayload());

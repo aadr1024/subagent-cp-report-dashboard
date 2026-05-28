@@ -107,8 +107,31 @@ def latest_runs() -> list[tuple[Path, dict]]:
     runs.sort(key=lambda item: item[1].get("updated_at") or item[1].get("started_at") or item[0].name, reverse=True)
     latest = {}
     for path, state in runs:
-        latest.setdefault(str(state.get("structure")), (path, state))
+        structure = str(state.get("structure"))
+        if structure in latest:
+            continue
+        if not usable_leaf_run(path) and any(str(existing_state.get("structure")) == structure and usable_leaf_run(existing_path) for existing_path, existing_state in runs):
+            continue
+        latest[structure] = (path, state)
     return sorted(latest.values(), key=lambda item: int(item[1].get("target", {}).get("ordinal") or 999))
+
+
+def usable_leaf_run(run_dir: Path) -> bool:
+    results = read_json(run_dir / "leaf-results.json", {})
+    if not isinstance(results, dict):
+        return False
+    useful = 0
+    readings = 0
+    expected = {"table3-north", "table3-east", "table3-south", "table3-west", "table4-stations", "table5-currents", "table6-potentials"}
+    for name, payload in results.items():
+        if not isinstance(payload, dict):
+            continue
+        leaf_readings = payload.get("readings") or []
+        if isinstance(leaf_readings, list):
+            readings += len(leaf_readings)
+            if name in expected and leaf_readings:
+                useful += 1
+    return readings > 0 and useful >= 3
 
 
 def number(value):
@@ -337,7 +360,7 @@ def deterministic_flags(dataset: dict, log: ValidationLog) -> list[dict]:
         numeric = record.get("numeric")
         is_row2_shunt = "row 2" in label_text or "shunt" in label_text
         orientation_terms = re.search(r"upside|rotat|orientation|angle|glare|seven[- ]?segment|voltmeter", label_text, re.I)
-        unit_conflict = is_row2_shunt and re.search(r"ma|amp", unit, re.I)
+        unit_conflict = is_row2_shunt and re.search(r"\bma\b|amp", unit, re.I)
         suspicious_digit = is_row2_shunt and numeric is not None and abs(numeric) >= 50 and re.search(r"[069]", str(record.get("value") or ""))
         if orientation_terms or unit_conflict or suspicious_digit:
             flags.append(anomaly(
@@ -694,7 +717,7 @@ def docx_review_flags(log: ValidationLog) -> list[dict]:
     log.agent("docx-review-validator", "running", "Reading final DOCX and comparing against writer cell patches")
     payload = docx_review.build_payload()
     flags = []
-    blocking = {"missing_write", "mismatch", "patch_error"}
+    blocking = {"missing_write", "mismatch", "patch_error", "derived_mismatch"}
     for structure in payload.get("structures") or []:
         evidence = []
         for slot in structure.get("slots") or []:
@@ -710,6 +733,7 @@ def docx_review_flags(log: ValidationLog) -> list[dict]:
                 "source_image": slot.get("source_ref"),
                 "value": slot.get("actual"),
                 "expected": slot.get("expected"),
+                "writer_expected": slot.get("writer_expected"),
                 "status": slot.get("status"),
                 "label": slot.get("label"),
             })

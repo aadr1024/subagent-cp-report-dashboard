@@ -153,8 +153,31 @@ def latest_runs() -> list[tuple[Path, dict]]:
     runs.sort(key=lambda item: item[1].get("updated_at") or item[1].get("started_at") or item[0].name, reverse=True)
     by_structure: dict[str, tuple[Path, dict]] = {}
     for path, state in runs:
-        by_structure.setdefault(str(state.get("structure")), (path, state))
+        structure = str(state.get("structure"))
+        if structure in by_structure:
+            continue
+        if not usable_leaf_run(path) and any(str(existing_state.get("structure")) == structure and usable_leaf_run(existing_path) for existing_path, existing_state in runs):
+            continue
+        by_structure[structure] = (path, state)
     return sorted(by_structure.values(), key=lambda item: int(item[1].get("target", {}).get("ordinal") or 999))
+
+
+def usable_leaf_run(run_dir: Path) -> bool:
+    results = read_json(run_dir / "leaf-results.json", {})
+    if not isinstance(results, dict):
+        return False
+    useful = 0
+    readings = 0
+    expected = {"table3-north", "table3-east", "table3-south", "table3-west", "table4-stations", "table5-currents", "table6-potentials"}
+    for name, payload in results.items():
+        if not isinstance(payload, dict):
+            continue
+        leaf_readings = payload.get("readings") or []
+        if isinstance(leaf_readings, list):
+            readings += len(leaf_readings)
+            if name in expected and leaf_readings:
+                useful += 1
+    return readings > 0 and useful >= 3
 
 
 def run_command(args: list[str], label: str, timeout: int | None = None) -> dict:

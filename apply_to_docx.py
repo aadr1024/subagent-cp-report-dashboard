@@ -197,6 +197,18 @@ def station_number(reading: dict, fallback: int) -> str | None:
     return str(fallback) if fallback in (1, 2) else None
 
 
+def station_key_for_mg_index(idx: int) -> str:
+    return "Test Station 1" if int(idx) <= 3 else "Test Station 2"
+
+
+def normalized_station_key(reading: dict, idx: int) -> str:
+    fallback_station = 1 if int(idx) <= 3 else 2
+    explicit = station_number(reading, fallback_station)
+    if explicit in {"1", "2"}:
+        return f"Test Station {explicit}"
+    return station_key_for_mg_index(idx)
+
+
 def build_patch(run_dir: Path, state: State) -> dict:
     results = json.loads((run_dir / "leaf-results.json").read_text())
     target = state.state["target"]["target_tables"]
@@ -237,15 +249,24 @@ def build_patch(run_dir: Path, state: State) -> dict:
 
     table5 = leaf_readings("table5-currents")
     station_counts = {"Test Station 1": 0, "Test Station 2": 0}
+    station_sources = {"Test Station 1": [], "Test Station 2": []}
     for fallback, reading in enumerate(table5, start=1):
         idx = reading_mg_index(reading, fallback)
-        station = reading.get("station") or ("Test Station 1" if idx <= 3 else "Test Station 2")
+        if not 1 <= idx <= 7:
+            warnings.append({"issue": "Skipped Table 5 reading because MG index is outside the report table shape.", "mg_index": idx, "reading": reading})
+            continue
+        station = normalized_station_key(reading, idx)
         station_counts[station] = station_counts.get(station, 0) + 1
+        if reading.get("source_image"):
+            station_sources.setdefault(station, []).append(reading.get("source_image"))
         add(target["table5"], 1, idx, display_plain(reading["visible_value"]), reading["source_image"], f"{reading['annotation_label']}: {reading['visible_value']} {reading.get('unit_seen')}", reading.get("confidence"), reading.get("notes"))
 
     table6 = leaf_readings("table6-potentials")
     for fallback, reading in enumerate(table6, start=1):
         idx = reading_mg_index(reading, fallback)
+        if not 1 <= idx <= 7:
+            warnings.append({"issue": "Skipped Table 6 reading because MG index is outside the report table shape.", "mg_index": idx, "reading": reading})
+            continue
         add(target["table6"], 1, idx, display_mv(reading["visible_value"]), reading["source_image"], f"{reading['annotation_label']}: {reading['visible_value']} {reading.get('unit_seen')}", reading.get("confidence"), reading.get("notes"))
 
     t4_values = {}
@@ -262,8 +283,12 @@ def build_patch(run_dir: Path, state: State) -> dict:
 
     count1 = station_counts.get("Test Station 1", 0)
     count2 = station_counts.get("Test Station 2", 0)
-    add(target["table4"], 1, 1, str(count1), "Table 5 station-1 MG leaves", "Derived anode count from Table 5 Test Station 1 MG labels", None, None)
-    add(target["table4"], 1, 2, str(count2), "Table 5 station-2 MG leaves", "Derived anode count from Table 5 Test Station 2 MG labels", None, None)
+    if table5 and not count1 and any(reading_mg_index(reading, index) <= 3 for index, reading in enumerate(table5, start=1)):
+        warnings.append({"issue": "Station 1 anode count recovered from MG index split because explicit station labels were unusable."})
+    if table5 and not count2 and any(reading_mg_index(reading, index) >= 4 for index, reading in enumerate(table5, start=1)):
+        warnings.append({"issue": "Station 2 anode count recovered from MG index split because explicit station labels were unusable."})
+    add(target["table4"], 1, 1, str(count1), "Table 5 station-1 MG leaves", "Derived anode count from Table 5 MG1-MG3 occupied current leaves", None, {"source_images": station_sources.get("Test Station 1", [])})
+    add(target["table4"], 1, 2, str(count2), "Table 5 station-2 MG leaves", "Derived anode count from Table 5 MG4+ occupied current leaves", None, {"source_images": station_sources.get("Test Station 2", [])})
     for col, station in [(1, "1"), (2, "2")]:
         shunt = t4_values.get((2, station))
         total = t4_values.get((3, station))
