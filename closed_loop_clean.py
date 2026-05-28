@@ -251,7 +251,9 @@ def batch_write_latest_runs(runs: list[tuple[Path, dict]]) -> list[dict]:
                 apply_to_docx.set_paragraph_text(body_items[heading_index], state_data["target"]["heading_to_write"])
                 patch_path = run_dir / "docx-cell-patch.json"
                 write_json(patch_path, patch)
+                locks = apply_to_docx.active_cell_locks()
                 for item in patch.get("cells", []):
+                    apply_to_docx.enforce_cell_lock(str(state_data.get("structure")), item, locks)
                     table_index = int(item["table_index"])
                     row_index = int(item["row_index"])
                     col_index = int(item["col_index"])

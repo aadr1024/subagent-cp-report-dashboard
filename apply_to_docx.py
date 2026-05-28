@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 CURRENT = RUNS / "current-run.txt"
 SOURCE_OF_TRUTH = ROOT / "report-source-of-truth.json"
+DOCX_CELL_LOCKS = RUNS / "docx-cell-locks.jsonl"
 
 
 def load_report_source_of_truth() -> dict:
@@ -40,6 +41,53 @@ NS = {"w": W}
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def active_cell_locks() -> dict[str, dict]:
+    locks: dict[str, dict] = {}
+    for item in read_jsonl(DOCX_CELL_LOCKS):
+        key = str(item.get("lock_key") or "")
+        if not key:
+            continue
+        action = str(item.get("action") or item.get("status") or "lock").lower()
+        if action in {"unlock", "unlocked"}:
+            locks.pop(key, None)
+        else:
+            locks[key] = item
+    return locks
+
+
+def cell_lock_key(structure: str, table_index, row_index, col_index) -> str:
+    return "|".join(str(part) for part in [structure, table_index, row_index, col_index])
+
+
+def enforce_cell_lock(structure: str, item: dict, locks: dict[str, dict] | None = None) -> None:
+    locks = locks if locks is not None else active_cell_locks()
+    key = cell_lock_key(structure, item.get("table_index"), item.get("row_index"), item.get("col_index"))
+    lock = locks.get(key)
+    if not lock:
+        return
+    locked_value = str(lock.get("locked_value") or lock.get("value") or "").strip()
+    incoming = str(item.get("value") or "").strip()
+    if incoming == locked_value:
+        return
+    raise RuntimeError(f"Locked DOCX cell write blocked for {key}: locked={locked_value!r}, incoming={incoming!r}. Unlock this exact cell before changing it.")
 
 
 def q(local: str) -> str:
@@ -232,6 +280,7 @@ def build_patch(run_dir: Path, state: State) -> dict:
             "confidence": confidence,
             "notes": notes,
             "verifier_id": "gpt-5.2",
+            "lock_key": cell_lock_key(state.state["structure"], table, row, col),
         })
 
     rows = [
@@ -338,6 +387,7 @@ def write_docx(run_dir: Path, state: State, patch: dict, shared: bool = True) ->
     if source.resolve() not in {ORIGINAL.resolve(), SHARED_OUTPUT.resolve()}:
         raise RuntimeError("Unexpected DOCX source path. Check report-source-of-truth.json.")
     parser = etree.XMLParser(remove_blank_text=False, resolve_entities=False)
+    locks = active_cell_locks()
     with zipfile.ZipFile(source) as zin:
         infos = zin.infolist()
         members = {info.filename: zin.read(info.filename) for info in infos}
@@ -348,6 +398,7 @@ def write_docx(run_dir: Path, state: State, patch: dict, shared: bool = True) ->
     set_paragraph_text(body_items[heading_index], state.state["target"]["heading_to_write"])
     tables = root.xpath(".//w:tbl", namespaces=NS)
     for item in patch["cells"]:
+        enforce_cell_lock(structure, item, locks)
         table_index = int(item["table_index"])
         row_index = int(item["row_index"])
         col_index = int(item["col_index"])

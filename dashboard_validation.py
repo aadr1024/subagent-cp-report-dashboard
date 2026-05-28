@@ -18,7 +18,7 @@ FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 REGRESSION_RECHECKS = RUNS / "regression-rechecks"
 CLOSED_LOOP_LEDGER = RUNS / "closed-loop-clean.jsonl"
-ClOSED_LOOP_STATUS = RUNS / "closed-loop-status.json"
+CLOSED_LOOP_STATUS = RUNS / "closed-loop-status.json"
 FEEDBACK_CORRECTION_STATUS = RUNS / "feedback-correction-status.json"
 DASHBOARD_HISTORY = RUNS / "dashboard-validation-history.jsonl"
 
@@ -75,7 +75,7 @@ def live_log_for_case(item: dict, selected_case: str | None) -> list[dict]:
     if not should_stream:
         return []
     out = []
-    closed_loop = read_json(ClOSED_LOOP_STATUS, {})
+    closed_loop = read_json(CLOSED_LOOP_STATUS, {})
     if closed_loop:
         out.append({
             "at": closed_loop.get("updated_at") or now(),
@@ -197,6 +197,31 @@ def check_anode_count_guard() -> dict:
     return case("docx-anode-count-derived-from-mg", "DOCX anode counts must derive from filled MG rows", "pass", "Table 4 anode count cells agree with filled Table 5 MG rows", severity="high")
 
 
+def check_locked_cell_drift() -> dict:
+    payload = docx_review.build_payload()
+    bad = []
+    locked = 0
+    for structure in payload.get("structures") or []:
+        for slot in structure.get("slots") or []:
+            if slot.get("locked"):
+                locked += 1
+            if slot.get("status") in {"locked_drift", "locked_write_attempt"}:
+                bad.append({
+                    "structure": structure.get("structure"),
+                    "run_id": structure.get("run_id"),
+                    "label": slot.get("label"),
+                    "table": slot.get("table_key"),
+                    "actual": slot.get("actual"),
+                    "expected": slot.get("expected"),
+                    "locked_value": slot.get("locked_value"),
+                    "status": slot.get("status"),
+                    "lock_key": slot.get("lock_key"),
+                })
+    if bad:
+        return case("locked-docx-cell-drift-monitor", "Locked DOCX cells must never change silently", "fail", f"{len(bad)} locked cell issue(s): drift or attempted overwrite", severity="high", active=True, evidence=bad[:12])
+    return case("locked-docx-cell-drift-monitor", "Locked DOCX cells must never change silently", "pass", f"{locked} locked cell(s) monitored; no drift/attempted overwrite", severity="high")
+
+
 def check_closed_loop_integrity() -> list[dict]:
     entries = read_jsonl(CLOSED_LOOP_LEDGER)
     bad_clean = [
@@ -260,6 +285,7 @@ def build_payload(selected_case: str | None = None, record: bool = False) -> dic
         guarded("feedback-corrections", check_feedback_corrections),
         guarded("docx-review", check_docx_review),
         guarded("anode-count", check_anode_count_guard),
+        guarded("locked-cells", check_locked_cell_drift),
         guarded("closed-loop", check_closed_loop_integrity),
         guarded("monitored-bugs", monitored_bug_cases),
     ]:

@@ -35,6 +35,7 @@ const docxOpenStructures = new Set();
 const softwareValidationDrafts = new Map();
 const docxReviewDrafts = new Map();
 let docxReviewFilter = "";
+let activeDocxCellKey = "";
 let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
@@ -1022,7 +1023,7 @@ async function pollValidation() {
 }
 
 function docxStatusClass(status) {
-  if (["missing_write", "mismatch", "patch_error", "derived_mismatch", "needs_attention"].includes(status)) return "bad";
+  if (["missing_write", "mismatch", "patch_error", "derived_mismatch", "locked_drift", "locked_write_attempt", "needs_attention"].includes(status)) return "bad";
   if (["blank", "partial_or_blank"].includes(status)) return "blank";
   if (["matched", "complete"].includes(status)) return "ok";
   if (["docx_only"].includes(status)) return "docx-only";
@@ -1030,7 +1031,7 @@ function docxStatusClass(status) {
 }
 
 function docxReviewLine(summary = {}) {
-  return `${Number(summary.filled || 0)}/${Number(summary.total || 0)} filled · ${Number(summary.blank || 0)} blank · ${Number(summary.mismatch || 0) + Number(summary.missing_write || 0) + Number(summary.patch_error || 0) + Number(summary.derived_mismatch || 0)} blocking`;
+  return `${Number(summary.filled || 0)}/${Number(summary.total || 0)} filled · ${Number(summary.blank || 0)} blank · ${Number(summary.mismatch || 0) + Number(summary.missing_write || 0) + Number(summary.patch_error || 0) + Number(summary.derived_mismatch || 0) + Number(summary.locked_drift || 0) + Number(summary.locked_write_attempt || 0)} blocking`;
 }
 
 function groupDocxSlots(slots = []) {
@@ -1063,9 +1064,13 @@ function docxSlotKey(structure, slot) {
   return slot.feedback_key || [structure, slot.table_key || "", slot.label || "", slot.row_index || "", slot.col_index || ""].join("|");
 }
 
+function docxLockKey(structure, slot) {
+  return slot.lock_key || [structure, slot.table_index ?? "", slot.row_index ?? "", slot.col_index ?? ""].join("|");
+}
+
 function docxRiskForSlot(slot) {
   const status = slot.status || "blank";
-  if (["missing_write", "mismatch", "patch_error", "derived_mismatch"].includes(status)) return "blocking";
+  if (["missing_write", "mismatch", "patch_error", "derived_mismatch", "locked_drift", "locked_write_attempt"].includes(status)) return "blocking";
   if (["blank", "not_started"].includes(status)) return "low_blank";
   if (status === "docx_only") return "docx_only";
   if (status === "matched") return "matched";
@@ -1113,8 +1118,10 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
   const previewTitle = `STR ${structure || "?"} · ${slot.group || slot.table_key || "DOCX"} · ${slot.label || "cell"} · ${actual || "blank"}`;
   const groups = contextGroups.map((group) => ({ ...group, current: (group.sources || []).some((source) => sources.includes(source)) }));
   const slotKey = docxSlotKey(structure, slot);
+  const lockKey = docxLockKey(structure, slot);
   const feedback = slot.feedback || [];
   const reviewed = feedback.some((item) => ["good", "reviewed", "ok"].includes(String(item.status || "").toLowerCase()));
+  const locked = Boolean(slot.locked);
   const draft = docxReviewDrafts.has(slotKey) ? docxReviewDrafts.get(slotKey) : "";
   const meta = [
     expected ? `expected ${expected}` : "no extracted value",
@@ -1123,24 +1130,29 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
     slot.source_ref ? `source ${slot.source_ref}` : "",
     slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
   ].filter(Boolean).join(" · ");
-  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""}" title="${escapeHtml(meta)}"
+  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
     data-slot-key="${escapeHtml(slotKey)}"
+    data-lock-key="${escapeHtml(lockKey)}"
     data-structure="${escapeHtml(structure)}"
     data-table-key="${escapeHtml(slot.table_key || "")}"
     data-label="${escapeHtml(slot.label || "")}"
+    data-row-index="${escapeHtml(slot.row_index ?? "")}"
+    data-col-index="${escapeHtml(slot.col_index ?? "")}"
     data-cell-status="${escapeHtml(status)}"
     data-actual="${escapeHtml(actual)}"
     data-expected="${escapeHtml(expected)}"
+    data-source-refs="${escapeHtml(JSON.stringify(sources))}"
     data-preview-src="${escapeHtml(previewHref)}"
     data-preview-title="${escapeHtml(previewTitle)}"
     data-neighborhood="${escapeHtml(neighborhood)}"
     data-context-groups="${escapeHtml(JSON.stringify(groups))}">
     <span>${escapeHtml(slot.label || "cell")}</span>
     <strong>${escapeHtml(actual || "blank")}</strong>
-    <small>${escapeHtml(status.replaceAll("_", " "))}${expected && actual !== expected ? ` · should be ${escapeHtml(expected)}` : ""}</small>
+    <small>${locked ? `locked ${escapeHtml(slot.locked_value || actual)}` : escapeHtml(status.replaceAll("_", " "))}${expected && actual !== expected ? ` · should be ${escapeHtml(expected)}` : ""}</small>
     <div class="docx-cell-actions">
-      <button class="docx-good small-btn" type="button">Good TY</button>
+      <button class="docx-good small-btn" type="button">Good TY + Lock</button>
       <button class="docx-toggle-review small-btn" type="button">Review</button>
+      <button class="${locked ? "docx-unlock" : "docx-lock"} small-btn" type="button">${locked ? "Unlock" : "Lock"}</button>
     </div>
     <div class="docx-cell-feedback">
       <textarea class="docx-review-input" rows="2" placeholder="Review this DOCX cell">${escapeHtml(draft)}</textarea>
@@ -1177,11 +1189,62 @@ function renderDocxFilterResults(structures = []) {
   </div>`;
 }
 
+function findDocxSlot(slots, tableKey, label, group = "") {
+  return slots.find((slot) => slot.table_key === tableKey && slot.label === label && (!group || slot.group === group));
+}
+
+function renderDocxWordCell(slot, structureItem, contextGroups) {
+  return `<td>${slot ? renderDocxCell(slot, structureItem, contextGroups) : `<div class="docx-cell idle"><span>not in DOCX</span><strong>--</strong><small>outside table</small></div>`}</td>`;
+}
+
+function renderDocxWordTables(item, contextGroups = []) {
+  const slots = item.slots || [];
+  const table3Rows = [
+    ["North", "Table 3 North"],
+    ["East", "Table 3 East"],
+    ["South", "Table 3 South"],
+    ["West", "Table 3 West"],
+  ];
+  const readingLabels = ["Reading 1", "Reading 2", "Reading 3", "Reading 4", "Reading 5"];
+  const table4Rows = [
+    ["No. of Anodes", "Anodes TS1", "Anodes TS2"],
+    ["Shunt Reading", "Shunt TS1", "Shunt TS2"],
+    ["Total Current", "Total current TS1", "Total current TS2"],
+    ["Anode Life", "Life TS1", "Life TS2"],
+  ];
+  const mgLabels = Array.from({ length: 7 }, (_, index) => `MG ${index + 1}`);
+  const section = (title, html, hint = "") => `<section class="docx-word-table-block">
+    <div class="docx-table-head"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(hint)}</span></div>
+    ${html}
+  </section>`;
+  const table3 = `<table class="docx-word-table table3-review">
+    <thead><tr><th>Direction</th>${readingLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead>
+    <tbody>${table3Rows.map(([direction, group]) => `<tr><th>${escapeHtml(direction)}</th>${readingLabels.map((label) => renderDocxWordCell(findDocxSlot(slots, "table3", label, group), item, contextGroups)).join("")}</tr>`).join("")}</tbody>
+  </table>`;
+  const table4 = `<table class="docx-word-table table4-review">
+    <thead><tr><th>Item</th><th>Test Station 1</th><th>Test Station 2</th></tr></thead>
+    <tbody>${table4Rows.map(([row, ts1, ts2]) => `<tr><th>${escapeHtml(row)}</th>${renderDocxWordCell(findDocxSlot(slots, "table4", ts1), item, contextGroups)}${renderDocxWordCell(findDocxSlot(slots, "table4", ts2), item, contextGroups)}</tr>`).join("")}</tbody>
+  </table>`;
+  const table5 = `<table class="docx-word-table table5-review">
+    <thead><tr><th>Current</th>${mgLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead>
+    <tbody><tr><th>mA</th>${mgLabels.map((label) => renderDocxWordCell(findDocxSlot(slots, "table5", label), item, contextGroups)).join("")}</tr></tbody>
+  </table>`;
+  const table6 = `<table class="docx-word-table table6-review">
+    <thead><tr><th>Potential</th>${mgLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead>
+    <tbody><tr><th>mV</th>${mgLabels.map((label) => renderDocxWordCell(findDocxSlot(slots, "table6", label), item, contextGroups)).join("")}</tr></tbody>
+  </table>`;
+  return [
+    section("Table 3", table3, "pipe-to-soil readings by direction"),
+    section("Table 4", table4, "station summary"),
+    section("Table 5", table5, "MG current readings"),
+    section("Table 6", table6, "MG potentials"),
+  ].join("");
+}
+
 function renderDocxStructure(item, index) {
   const structure = String(item.structure || "?");
   const summary = item.summary || {};
   const shouldOpen = docxOpenStructures.has(structure) || (!docxOpenStructures.size && index < 1 && item.status !== "complete");
-  const groups = groupDocxSlots(item.slots || []);
   const contextGroups = docxContextGroups(item.slots || []);
   return `<details class="docx-structure ${docxStatusClass(item.status)}" data-structure="${escapeHtml(structure)}" ${shouldOpen ? "open" : ""}>
     <summary>
@@ -1198,12 +1261,7 @@ function renderDocxStructure(item, index) {
       </div>
     </summary>
     ${item.patch_error ? `<div class="docx-warning">${escapeHtml(item.patch_error)}</div>` : ""}
-    <div class="docx-table-list">
-      ${groups.map((group) => `<section class="docx-table-block">
-        <div class="docx-table-head"><strong>${escapeHtml(group.title)}</strong><span>${Number(group.items.filter((slot) => String(slot.actual || "").trim()).length)}/${group.items.length} filled</span></div>
-        <div class="docx-cell-grid">${group.items.map((slot) => renderDocxCell(slot, item, contextGroups)).join("")}</div>
-      </section>`).join("")}
-    </div>
+    <div class="docx-table-list">${renderDocxWordTables(item, contextGroups)}</div>
   </details>`;
 }
 
@@ -1231,6 +1289,7 @@ function renderDocxReview(payload) {
     <div class="stat-card"><span>Cells</span><strong>${Number(summary.filled || 0)}/${Number(summary.total || 0)}</strong><small>actual DOCX filled</small></div>
     <div class="stat-card"><span>Blanks</span><strong>${Number(summary.blank || 0)}</strong><small>visible empty slots</small></div>
     <div class="stat-card"><span>Blocking</span><strong>${Number(summary.problem || 0)}</strong><small>missing write / mismatch / patch issue</small></div>
+    <div class="stat-card"><span>Locked drift</span><strong>${Number(summary.locked_drift || 0) + Number(summary.locked_write_attempt || 0)}</strong><small>changed or attempted overwrite</small></div>
   </div>
   ${renderDocxRiskControls(structures)}
   <div class="validation-note">This panel reads the final DOCX file and compares it against the same cell patches used by the DOCX writer. If Word saves a manual change, the next refresh reflects the saved document state.</div>
@@ -1909,9 +1968,80 @@ async function saveDocxReviewFeedback(button, status = "reviewed", fallbackText 
     docxReviewDrafts.delete(cell.dataset.slotKey || "");
     if (input) input.value = "";
   }
-  setTimeout(() => { button.textContent = button.classList.contains("docx-good") ? "Good TY" : "Save review"; }, 1200);
+  setTimeout(() => { button.textContent = button.classList.contains("docx-good") ? "Good TY + Lock" : "Save review"; }, 1200);
   pollDocxReview();
   pollFeedbackStatus();
+}
+
+async function saveDocxCellLock(button, action = "lock", note = "") {
+  const cell = button.closest(".docx-cell");
+  if (!cell?.dataset.lockKey) return;
+  button.disabled = true;
+  button.textContent = action === "unlock" ? "Unlocking" : "Locking";
+  let sourceRefs = [];
+  try { sourceRefs = JSON.parse(cell.dataset.sourceRefs || "[]"); } catch {}
+  const res = await fetch("/api/docx-review/lock", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      lock_key: cell.dataset.lockKey,
+      slot_key: cell.dataset.slotKey,
+      locked_value: cell.dataset.actual,
+      actual: cell.dataset.actual,
+      structure: cell.dataset.structure,
+      table_key: cell.dataset.tableKey,
+      label: cell.dataset.label,
+      row_index: cell.dataset.rowIndex,
+      col_index: cell.dataset.colIndex,
+      source_refs: sourceRefs,
+      note,
+    }),
+  });
+  button.disabled = false;
+  button.textContent = res.ok ? (action === "unlock" ? "Unlocked" : "Locked") : "Lock failed";
+  setTimeout(() => { button.textContent = action === "unlock" ? "Unlock" : "Lock"; }, 1200);
+  pollDocxReview();
+  pollDashboardValidation("locked-docx-cell-drift-monitor");
+  pollActivity();
+}
+
+function docxReviewCells() {
+  return [...document.querySelectorAll("#docxReviewPanel .docx-cell[data-slot-key]")];
+}
+
+function selectDocxCell(cell) {
+  if (!cell?.dataset.slotKey) return;
+  activeDocxCellKey = cell.dataset.slotKey;
+  document.querySelectorAll("#docxReviewPanel .docx-cell.selected").forEach((node) => node.classList.remove("selected"));
+  cell.classList.add("selected");
+  cell.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+}
+
+function activeDocxCell() {
+  return activeDocxCellKey
+    ? document.querySelector(`#docxReviewPanel .docx-cell[data-slot-key="${CSS.escape(activeDocxCellKey)}"]`)
+    : document.querySelector("#docxReviewPanel .docx-cell[data-slot-key]");
+}
+
+function moveDocxSelection(delta) {
+  const cells = docxReviewCells();
+  if (!cells.length) return;
+  const current = activeDocxCell();
+  const index = Math.max(0, cells.indexOf(current));
+  const next = cells[Math.max(0, Math.min(cells.length - 1, index + delta))];
+  selectDocxCell(next);
+}
+
+function approveActiveDocxCell() {
+  const cell = activeDocxCell();
+  if (!cell) return;
+  selectDocxCell(cell);
+  const button = cell.querySelector(".docx-good");
+  if (!button) return;
+  saveDocxReviewFeedback(button, "good", "Good TY");
+  saveDocxCellLock(button, "lock", "Good TY + Lock from DOCX Review keyboard shortcut");
+  setTimeout(() => moveDocxSelection(1), 140);
 }
 
 function renderRegressionLedger(payload) {
@@ -2468,9 +2598,19 @@ document.addEventListener("click", (event) => {
   const docxToggle = event.target.closest(".docx-toggle-review");
   if (docxToggle) docxToggle.closest(".docx-cell")?.classList.toggle("review-open");
   const docxGood = event.target.closest(".docx-good");
-  if (docxGood) saveDocxReviewFeedback(docxGood, "good", "Good TY");
+  if (docxGood) {
+    selectDocxCell(docxGood.closest(".docx-cell"));
+    saveDocxReviewFeedback(docxGood, "good", "Good TY");
+    saveDocxCellLock(docxGood, "lock", "Good TY + Lock from DOCX Review");
+  }
   const docxSave = event.target.closest(".save-docx-review");
   if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
+  const docxLock = event.target.closest(".docx-lock");
+  if (docxLock) saveDocxCellLock(docxLock, "lock", "Locked from DOCX Review");
+  const docxUnlock = event.target.closest(".docx-unlock");
+  if (docxUnlock) saveDocxCellLock(docxUnlock, "unlock", "Unlocked from DOCX Review");
+  const docxCell = event.target.closest(".docx-cell");
+  if (docxCell && !event.target.closest("button, textarea, .hover-preview")) selectDocxCell(docxCell);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
@@ -2529,6 +2669,48 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       submitChipFeedback(quick.closest(".reading-chip"), quick.value);
+      return;
+    }
+  }
+  const typing = event.target.closest?.("input, textarea, select, [contenteditable='true']");
+  if (!typing && (event.target.closest?.("#docxReviewPanel") || activeDocxCellKey)) {
+    if (["ArrowRight", "ArrowDown", "j", "J"].includes(event.key)) {
+      event.preventDefault();
+      moveDocxSelection(1);
+      return;
+    }
+    if (["ArrowLeft", "ArrowUp", "k", "K"].includes(event.key)) {
+      event.preventDefault();
+      moveDocxSelection(-1);
+      return;
+    }
+    if (["Enter", "a", "A", "g", "G"].includes(event.key)) {
+      event.preventDefault();
+      approveActiveDocxCell();
+      return;
+    }
+    if (["r", "R"].includes(event.key)) {
+      event.preventDefault();
+      const cell = activeDocxCell();
+      if (cell) {
+        selectDocxCell(cell);
+        cell.classList.toggle("review-open");
+        cell.querySelector(".docx-review-input")?.focus();
+      }
+      return;
+    }
+    if (["l", "L"].includes(event.key)) {
+      event.preventDefault();
+      const cell = activeDocxCell();
+      const button = cell?.querySelector(".docx-lock");
+      if (button) saveDocxCellLock(button, "lock", "Locked from DOCX Review keyboard shortcut");
+      return;
+    }
+    if (["u", "U"].includes(event.key)) {
+      event.preventDefault();
+      const cell = activeDocxCell();
+      const button = cell?.querySelector(".docx-unlock");
+      if (button) saveDocxCellLock(button, "unlock", "Unlocked from DOCX Review keyboard shortcut");
       return;
     }
   }

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
 DOCX_REVIEW_FEEDBACK = RUNS / "docx-review-feedback.jsonl"
+DOCX_CELL_LOCKS = RUNS / "docx-cell-locks.jsonl"
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
 
@@ -267,6 +268,24 @@ def feedback_by_slot() -> dict[str, list[dict]]:
     return out
 
 
+def active_cell_locks() -> dict[str, dict]:
+    locks: dict[str, dict] = {}
+    for item in read_jsonl(DOCX_CELL_LOCKS):
+        key = str(item.get("lock_key") or "")
+        if not key:
+            continue
+        action = str(item.get("action") or item.get("status") or "lock").lower()
+        if action in {"unlock", "unlocked"}:
+            locks.pop(key, None)
+        else:
+            locks[key] = item
+    return locks
+
+
+def cell_lock_key(structure: str, table_index, row_index, col_index) -> str:
+    return "|".join(str(part) for part in [structure, table_index, row_index, col_index])
+
+
 def mg_number(label: str) -> int | None:
     match = re.search(r"\bMG\s*(\d+)\b", str(label or ""), re.I)
     return int(match.group(1)) if match else None
@@ -331,7 +350,7 @@ def summarize(slots: list[dict]) -> dict:
     counts = {}
     for item in slots:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
-    problem = sum(counts.get(key, 0) for key in ("missing_write", "mismatch", "patch_error", "derived_mismatch"))
+    problem = sum(counts.get(key, 0) for key in ("missing_write", "mismatch", "patch_error", "derived_mismatch", "locked_drift", "locked_write_attempt"))
     return {
         "total": total,
         "filled": filled,
@@ -343,14 +362,17 @@ def summarize(slots: list[dict]) -> dict:
         "docx_only": counts.get("docx_only", 0),
         "patch_error": counts.get("patch_error", 0),
         "derived_mismatch": counts.get("derived_mismatch", 0),
+        "locked_drift": counts.get("locked_drift", 0),
+        "locked_write_attempt": counts.get("locked_write_attempt", 0),
         "not_started": counts.get("not_started", 0),
         "problem": problem,
         "counts": counts,
     }
 
 
-def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict], run_count: int = 0, feedback=None) -> dict:
+def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict], run_count: int = 0, feedback=None, locks=None) -> dict:
     feedback = feedback or {}
+    locks = locks or {}
     run_dir, state = run_item if run_item else (None, {})
     target_tables = state.get("target", {}).get("target_tables") or {}
     run_status = state.get("status") or ("not_started" if not run_item else "unknown")
@@ -371,6 +393,13 @@ def structure_payload(structure: str, source: dict, run_item, tables, specs: lis
         actual = docx_value(tables, table_index, spec["row_index"], spec["col_index"]) if table_index is not None else ""
         status = classify_slot("not_started" if not run_item else run_status, expected, actual, patch_error)
         meta = patch_meta.get(key, {}) if key else {}
+        lock_key = cell_lock_key(structure, table_index, spec["row_index"], spec["col_index"]) if table_index is not None else ""
+        lock = locks.get(lock_key)
+        locked_value = str((lock or {}).get("locked_value") or (lock or {}).get("value") or "").strip()
+        if lock and str(actual or "").strip() != locked_value:
+            status = "locked_drift"
+        elif lock and expected and str(expected).strip() != locked_value:
+            status = "locked_write_attempt"
         slot = {
             **spec,
             "table_index": table_index,
@@ -382,6 +411,11 @@ def structure_payload(structure: str, source: dict, run_item, tables, specs: lis
             "confidence": meta.get("confidence"),
             "notes": meta.get("notes"),
             "source_refs": [meta.get("source_ref"), *source_refs_from_notes(meta.get("notes"))],
+            "lock_key": lock_key,
+            "locked": bool(lock),
+            "locked_value": locked_value if lock else "",
+            "locked_at": (lock or {}).get("at"),
+            "lock_note": (lock or {}).get("note") or (lock or {}).get("feedback") or "",
         }
         key_text = docx_slot_key(structure, slot)
         slot["feedback_key"] = key_text
@@ -427,7 +461,8 @@ def build_payload() -> dict:
     structures = sorted(set(sources) | set(runs), key=lambda value: int(value) if value.isdigit() else value)
     specs = slot_specs()
     feedback = feedback_by_slot()
-    items = [structure_payload(structure, sources.get(structure, {}), runs.get(structure), tables, specs, len(all_runs.get(structure, [])), feedback) for structure in structures]
+    locks = active_cell_locks()
+    items = [structure_payload(structure, sources.get(structure, {}), runs.get(structure), tables, specs, len(all_runs.get(structure, [])), feedback, locks) for structure in structures]
     all_slots = [slot for item in items for slot in item["slots"]]
     return {
         "updated_at": stamp(),

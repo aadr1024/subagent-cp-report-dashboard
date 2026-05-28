@@ -23,6 +23,7 @@ const CLOSED_LOOP_LEDGER = path.join(RUNS, "closed-loop-clean.jsonl");
 const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
 const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.json");
 const DOCX_REVIEW_FEEDBACK = path.join(RUNS, "docx-review-feedback.jsonl");
+const DOCX_CELL_LOCKS = path.join(RUNS, "docx-cell-locks.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
@@ -842,6 +843,39 @@ async function saveDocxReviewFeedback(req, res) {
   json(res, 200, { ok: true, item });
 }
 
+async function saveDocxCellLock(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const lockKey = String(payload.lock_key || "").slice(0, 500);
+  const action = String(payload.action || "lock").replace(/[^a-zA-Z0-9_.-]/g, "");
+  if (!lockKey) return json(res, 400, { error: "missing lock_key" });
+  const item = {
+    at: new Date().toISOString(),
+    action: action === "unlock" ? "unlock" : "lock",
+    lock_key: lockKey,
+    slot_key: String(payload.slot_key || "").slice(0, 500),
+    locked_value: String(payload.locked_value ?? payload.actual ?? ""),
+    structure: payload.structure || null,
+    table_key: payload.table_key || null,
+    label: payload.label || null,
+    row_index: payload.row_index ?? null,
+    col_index: payload.col_index ?? null,
+    source_refs: Array.isArray(payload.source_refs) ? payload.source_refs.slice(0, 12) : [],
+    note: payload.note || (action === "unlock" ? "Unlocked from DOCX Review" : "Locked from DOCX Review"),
+    source: "docx_review_lock",
+  };
+  fs.appendFileSync(DOCX_CELL_LOCKS, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: item.action === "unlock" ? "docx_cell_unlocked" : "docx_cell_locked",
+    structure: item.structure,
+    title: `${item.table_key || "docx"} ${item.label || ""}`.trim(),
+    value: item.locked_value,
+    lock_key: item.lock_key,
+  }) + "\n");
+  docxReviewCache = { key: "", at: 0, payload: null };
+  json(res, 200, { ok: true, item });
+}
+
 function regressionRechecks() {
   const dirs = fs.readdirSync(REGRESSION_RECHECKS, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -1194,6 +1228,31 @@ function activityFeed() {
       message: event.message || "",
     });
   };
+  try {
+    const review = docxReviewPayload();
+    const lockedIssues = Number(review.summary?.locked_drift || 0) + Number(review.summary?.locked_write_attempt || 0);
+    if (lockedIssues) {
+      active_runs.push({
+        run_id: "locked-docx-monitor",
+        structure: "DOCX",
+        status: "failed",
+        active_step: "locked-cell-drift",
+        active_agent: "software-validation-lock-monitor",
+        updated_at: review.updated_at || new Date().toISOString(),
+        api_calls: 0,
+        artifacts: lockedIssues,
+      });
+      pushEvent({
+        run_id: "locked-docx-monitor",
+        structure: "DOCX",
+        status: "failed",
+        seq: 10_100_000,
+        at: new Date().toISOString(),
+        type: "locked-cell-drift",
+        message: `${lockedIssues} locked DOCX cell issue(s): drift or attempted overwrite`,
+      });
+    }
+  } catch {}
   const closedLoop = readJsonFile(CLOSED_LOOP_STATUS, null);
   if (closedLoop) {
     active_runs.push({
@@ -1608,6 +1667,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/report/open-final") return openFinalReport(res);
   if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
   if (url.pathname === "/api/docx-review/feedback") return saveDocxReviewFeedback(req, res);
+  if (url.pathname === "/api/docx-review/lock") return saveDocxCellLock(req, res);
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
   if (url.pathname === "/api/stats") return json(res, 200, stats());

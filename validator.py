@@ -717,7 +717,7 @@ def docx_review_flags(log: ValidationLog) -> list[dict]:
     log.agent("docx-review-validator", "running", "Reading final DOCX and comparing against writer cell patches")
     payload = docx_review.build_payload()
     flags = []
-    blocking = {"missing_write", "mismatch", "patch_error", "derived_mismatch"}
+    blocking = {"missing_write", "mismatch", "patch_error", "derived_mismatch", "locked_drift", "locked_write_attempt"}
     for structure in payload.get("structures") or []:
         evidence = []
         for slot in structure.get("slots") or []:
@@ -734,6 +734,8 @@ def docx_review_flags(log: ValidationLog) -> list[dict]:
                 "value": slot.get("actual"),
                 "expected": slot.get("expected"),
                 "writer_expected": slot.get("writer_expected"),
+                "locked_value": slot.get("locked_value"),
+                "lock_key": slot.get("lock_key"),
                 "status": slot.get("status"),
                 "label": slot.get("label"),
             })
