@@ -14,6 +14,7 @@ const VALIDATIONS = path.join(RUNS, "validations");
 const VALIDATION_REVIEW_METADATA = path.join(RUNS, "validation-review-metadata.jsonl");
 const FEEDBACK_PROCESSING = path.join(RUNS, "feedback-processing.jsonl");
 const REGRESSION_CASES = path.join(RUNS, "regression-cases.jsonl");
+const SOLUTION_FEEDBACK = path.join(RUNS, "solution-feedback.jsonl");
 const REGRESSION_RECHECKS = path.join(RUNS, "regression-rechecks");
 const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
 const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
@@ -25,10 +26,10 @@ const SOLUTION_DEFINITIONS = {
     detection_rule: "Applies to Table 3/Table 6, V DC, minus/negative/positive/polarity notes, and sign-mixed potential evidence.",
   },
   "table4-current-decimal-scale": {
-    title: "Table 4 current decimal scale",
-    problem: "LCD current values can be read as large un-decimaled integers, for example 6369 instead of 63.69 mA.",
-    solution: "Table 4 leaves must read current displays as mA, inspect decimal points carefully, and compare magnitude against same-station shunt/current peers before accepting large integer-like values.",
-    detection_rule: "Applies to Table 4 current/shunt readings, mA/mV units, and suspicious large values such as 6369, 4386, or 345.7.",
+    title: "Current decimal scale",
+    problem: "LCD current values can be read as large un-decimaled numbers, for example 6369 instead of 63.69 mA or 295.1 instead of 29.51 mA.",
+    solution: "Current-reading leaves must read displays as mA, inspect decimal points carefully, and compare magnitude against same-station current/shunt peers before accepting large number-like values.",
+    detection_rule: "Applies to Table 4 current/shunt and Table 5 current readings with suspicious large magnitudes or missed decimal points.",
   },
   "table3-five-reading-completeness": {
     title: "Table 3 five-reading completeness",
@@ -420,18 +421,35 @@ function solutionText(item, result = {}) {
 }
 
 function solutionIdForCase(item, result = {}) {
-  const text = solutionText(item, result);
-  if (/\btable\s*4\b|table4|shunt|\bma\b|\bmv\b|current|6369|4386|345\.7|decimal/.test(text)
-    && /current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7/.test(text)) {
+  const caseText = [
+    item.title,
+    item.kind,
+    item.severity,
+    item.note,
+    item.next_step,
+    ...(item.anomaly?.evidence || []).flatMap((entry) => [entry.agent, entry.row, entry.station, entry.value, entry.source_image]),
+  ].filter(Boolean).join(" ").toLowerCase();
+  const agents = new Set((item.anomaly?.evidence || []).map((entry) => entry.agent).filter(Boolean));
+  if ([...agents].some((agent) => agent === "table6-potentials")) {
+    return "potential-minus-sign-discipline";
+  }
+  if ([...agents].some((agent) => String(agent).startsWith("table3-"))) {
+    if (/(five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four)/.test(caseText)) {
+      return "table3-five-reading-completeness";
+    }
+    return "potential-minus-sign-discipline";
+  }
+  if ([...agents].some((agent) => agent === "table4-stations" || agent === "table5-currents")
+    && /(current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7|295\.1|far from peer|outlier)/.test(caseText)) {
     return "table4-current-decimal-scale";
   }
-  if ((/\btable\s*3\b|table3/.test(text)) && /(five|5\s+values|expected\s+five|expected\s+5|only\s+four|4\s+data|missing|count)/.test(text)) {
+  if ((/\btable\s*3\b|table3/.test(caseText)) && /(five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four)/.test(caseText)) {
     return "table3-five-reading-completeness";
   }
-  if (/(station|anode|\bmg\b|pair|coverage|group)/.test(text) && /(\btable\s*5\b|table5|\btable\s*6\b|table6|potential|current)/.test(text)) {
+  if (/(station|anode|\bmg\b|pair|coverage|group)/.test(caseText) && /(\btable\s*5\b|table5|\btable\s*6\b|table6|potential|current)/.test(caseText)) {
     return "station-pairing-coverage";
   }
-  if (/(minus|negative|positive|polarity|sign|potential|\bv\s*dc\b|\btable\s*3\b|table3|\btable\s*6\b|table6)/.test(text)) {
+  if (/(minus|negative|positive|polarity|sign|potential|\bv\s*dc\b|\btable\s*3\b|table3|\btable\s*6\b|table6)/.test(caseText)) {
     return "potential-minus-sign-discipline";
   }
   return "general-anomaly-review";
@@ -443,12 +461,30 @@ function resultValueChanged(reading) {
   return Boolean(oldValue && newValue && oldValue !== newValue);
 }
 
-function solutionOutcome(result) {
+function solutionFeedbackItems(solutionId = null) {
+  const items = readJsonLines(SOLUTION_FEEDBACK);
+  return items
+    .filter((item) => !solutionId || item.solution_id === solutionId)
+    .slice(-200)
+    .reverse();
+}
+
+function solutionOutcome(result, solutionId = "") {
   if (!result) return "not-run";
   const status = String(result.status || "").toLowerCase();
   const readings = Array.isArray(result.readings) ? result.readings : [];
   const changed = readings.some(resultValueChanged);
   const stillFlags = result.case_still_flags === true || readings.some((reading) => reading.issue_present === true);
+  const resultText = [
+    result.summary,
+    ...(result.agent_prompt_lessons || []),
+    ...readings.flatMap((reading) => [reading.notes, reading.rechecked_value, reading.unit]),
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (solutionId === "potential-minus-sign-discipline"
+    && ["reproduced", "needs_review"].includes(status)
+    && /(positive|no[- ]?minus|no visible minus|source shows|polarity|true positive)/.test(resultText)) {
+    return "accepted-source";
+  }
   if (status === "fixed") return "solved";
   if (changed && status !== "needs_review" && !stillFlags) return "corrected";
   if (changed && status !== "needs_review") return "source-corrected";
@@ -461,7 +497,7 @@ function solutionOutcomeCounts(cases) {
   return cases.reduce((counts, item) => {
     const outcome = item.outcome || "not-run";
     counts.total += 1;
-    if (["solved", "corrected", "source-corrected"].includes(outcome)) counts.solved += 1;
+    if (["solved", "corrected", "source-corrected", "accepted-source"].includes(outcome)) counts.solved += 1;
     else if (outcome === "needs-review") counts.needs_review += 1;
     else if (outcome === "not-run") counts.not_run += 1;
     else counts.open += 1;
@@ -527,7 +563,7 @@ function regressionSolutions() {
       });
     }
     const group = groups.get(solutionId);
-    const outcome = solutionOutcome(result);
+    const outcome = solutionOutcome(result, solutionId);
     const lessons = (result?.agent_prompt_lessons || []).filter(Boolean);
     for (const lesson of lessons) {
       if (!group.lessons.includes(lesson)) group.lessons.push(lesson);
@@ -563,6 +599,7 @@ function regressionSolutions() {
       status,
       counts,
       latest_recheck_id: latestResult?.recheck_id || null,
+      feedback: solutionFeedbackItems(group.solution_id).slice(0, 8),
       cases: group.cases.sort((a, b) => String(a.title || "").localeCompare(String(b.title || ""))),
       lessons: group.lessons.slice(0, 12),
     };
@@ -583,6 +620,28 @@ function regressionSolutions() {
       return acc;
     }, { solutions: 0, cases: 0, solved: 0, open: 0, needs_review: 0, not_run: 0 }),
   };
+}
+
+async function saveSolutionFeedback(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const solutionId = String(payload.solution_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
+  if (!solutionId || !SOLUTION_DEFINITIONS[solutionId]) return json(res, 404, { error: "unknown solution" });
+  const item = {
+    at: new Date().toISOString(),
+    solution_id: solutionId,
+    status: "active",
+    feedback: String(payload.feedback || "").trim(),
+    source: "solution_replay_suite",
+  };
+  if (!item.feedback) return json(res, 400, { error: "empty feedback" });
+  fs.appendFileSync(SOLUTION_FEEDBACK, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: "solution_feedback_saved",
+    solution_id: solutionId,
+    value: item.feedback,
+  }) + "\n");
+  json(res, 200, { ok: true, item });
 }
 
 function regressionRechecks() {
@@ -1165,6 +1224,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/regression/record") return recordRegressionCase(req, res);
   if (url.pathname === "/api/regression") return json(res, 200, { updated_at: new Date().toISOString(), cases: regressionCases() });
   if (url.pathname === "/api/regression/solutions") return json(res, 200, regressionSolutions());
+  if (url.pathname === "/api/regression/solutions/feedback") return saveSolutionFeedback(req, res);
   if (url.pathname === "/api/regression/rechecks") return json(res, 200, { updated_at: new Date().toISOString(), ...regressionRechecks() });
   if (url.pathname === "/api/regression/recheck/start") return startRegressionRecheck(req, res, url);
   if (url.pathname === "/api/feedback/status") return json(res, 200, feedbackStatus());

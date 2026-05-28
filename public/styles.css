@@ -2097,6 +2097,61 @@ main {
   font-size: 11px;
 }
 
+.solution-feedback-box {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 9px;
+  border: 1px dashed rgba(30, 99, 143, 0.28);
+  border-radius: 10px;
+  background: rgba(30, 99, 143, 0.045);
+}
+
+.solution-feedback-box textarea {
+  width: 100%;
+  min-height: 44px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px;
+  background: #fffdf7;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.solution-feedback-box small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.solution-feedback-history {
+  display: grid;
+  gap: 6px;
+}
+
+.solution-feedback-history div {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(217, 209, 194, 0.78);
+  border-left: 4px solid var(--blue);
+  border-radius: 9px;
+  background: rgba(255, 253, 247, 0.72);
+}
+
+.solution-feedback-history strong {
+  color: var(--blue);
+  font-size: 10px;
+}
+
+.solution-feedback-history span {
+  color: var(--muted);
+}
+
 .feedback-life-row,
 .regression-case {
   display: grid;
@@ -2307,6 +2362,10 @@ main {
   }
 
   .anomaly-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .solution-feedback-box {
     grid-template-columns: 1fr;
   }
 

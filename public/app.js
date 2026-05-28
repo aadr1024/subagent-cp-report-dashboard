@@ -1145,6 +1145,15 @@ function renderSolutionCard(solution) {
     </div>
     ${lessons.length ? `<div class="solution-lessons">${lessons.map((lesson) => `<mark>${escapeHtml(lesson)}</mark>`).join("")}</div>` : ""}
     <div class="solution-cases">${(solution.cases || []).map(renderSolutionCase).join("")}</div>
+    <div class="solution-feedback-box">
+      <textarea rows="2" placeholder="Give guidance for this general solution. Example: assume faint Table 3 LCD minus unless source clearly proves positive.">${escapeHtml("")}</textarea>
+      <button class="small-btn save-solution-feedback" data-solution-id="${escapeHtml(solution.solution_id || "")}">Save guidance</button>
+      <small>Saved guidance is injected into future OpenAI focused replays for this solution class.</small>
+    </div>
+    ${solution.feedback?.length ? `<div class="solution-feedback-history">${solution.feedback.map((item) => `<div>
+      <strong>${escapeHtml(fmtTime(item.at))}</strong>
+      <span>${escapeHtml(item.feedback || "")}</span>
+    </div>`).join("")}</div>` : ""}
     <div class="solution-actions">
       <button class="small-btn replay-solution" data-solution-id="${escapeHtml(solution.solution_id || "")}">Replay this solution</button>
       <small>Runs only matching recorded cases through the focused OpenAI recheck leaf.</small>
@@ -1173,6 +1182,29 @@ async function pollRegressionSolutions() {
     if (!res.ok) return;
     renderSolutionSuite(await res.json());
   } catch {}
+}
+
+async function saveSolutionFeedback(button) {
+  const card = button.closest(".solution-card");
+  const textarea = card?.querySelector(".solution-feedback-box textarea");
+  const feedback = textarea?.value?.trim() || "";
+  if (!feedback) return;
+  button.disabled = true;
+  button.textContent = "Saving";
+  const res = await fetch("/api/regression/solutions/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      solution_id: button.dataset.solutionId,
+      feedback,
+    }),
+  });
+  button.disabled = false;
+  button.textContent = res.ok ? "Saved" : "Save failed";
+  if (res.ok && textarea) textarea.value = "";
+  setTimeout(() => { button.textContent = "Save guidance"; }, 1200);
+  pollRegressionSolutions();
+  pollFeedbackStatus();
 }
 
 function renderRegressionLedger(payload) {
@@ -1643,6 +1675,8 @@ document.addEventListener("click", (event) => {
   if (good) saveAnomaly(good, "good");
   const replaySolution = event.target.closest(".replay-solution");
   if (replaySolution) startRegressionRecheck(replaySolution.dataset.solutionId || "");
+  const solutionFeedback = event.target.closest(".save-solution-feedback");
+  if (solutionFeedback) saveSolutionFeedback(solutionFeedback);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });

@@ -31,4 +31,6 @@ Each solution card shows:
 
 `Replay this solution` starts `regression_recheck.py --solution-id <id>`, so only matching recorded cases are re-run through the focused OpenAI vision leaf.
 
+Each solution card also has a guidance box. Saved guidance is written to `runs/solution-feedback.jsonl` and injected into future focused OpenAI replays for that solution class.
+
 The purpose is not to show only the latest validation decision. The purpose is to prove that an identified class of mistakes can be reproduced and then repeatedly corrected across its recorded examples.

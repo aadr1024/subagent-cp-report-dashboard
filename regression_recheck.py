@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
+SOLUTION_FEEDBACK = RUNS / "solution-feedback.jsonl"
 RECHECKS = RUNS / "regression-rechecks"
 MODEL = "gpt-5.2"
 SOLUTION_RULES = {
@@ -26,8 +27,8 @@ SOLUTION_RULES = {
         "prompt": "This replay targets sign discipline: preserve faint LCD minus signs, default Table 3/Table 6 potentials negative when local evidence supports it, and leave true positive/no-minus source readings positive while flagging polarity.",
     },
     "table4-current-decimal-scale": {
-        "title": "Table 4 current decimal scale",
-        "prompt": "This replay targets Table 4 current scale: inspect decimal points carefully, read current as mA, and compare suspicious large integer-like values against current/shunt peers.",
+        "title": "Current decimal scale",
+        "prompt": "This replay targets current-reading scale: inspect decimal points carefully, read currents as mA, and compare suspicious large integer-like values against nearby current/shunt peers.",
     },
     "table3-five-reading-completeness": {
         "title": "Table 3 five-reading completeness",
@@ -140,6 +141,16 @@ def latest_cases() -> list[dict]:
     return list(by_signature.values())
 
 
+def solution_feedback(solution_id: str | None) -> list[str]:
+    if not solution_id:
+        return []
+    items = []
+    for item in read_jsonl(SOLUTION_FEEDBACK):
+        if item.get("solution_id") == solution_id and item.get("feedback"):
+            items.append(str(item.get("feedback")))
+    return items[-12:]
+
+
 def solution_text(case: dict) -> str:
     evidence = case.get("anomaly", {}).get("evidence") or []
     parts = [
@@ -155,10 +166,25 @@ def solution_text(case: dict) -> str:
 
 
 def solution_id_for_case(case: dict) -> str:
-    text = solution_text(case)
-    if re.search(r"\btable\s*4\b|table4|shunt|\bma\b|\bmv\b|current|6369|4386|345\.7|decimal", text) and re.search(r"current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7", text):
+    evidence = case.get("anomaly", {}).get("evidence") or []
+    agents = {str(item.get("agent") or "") for item in evidence}
+    text = " ".join(str(part) for part in [
+        case.get("title"),
+        case.get("kind"),
+        case.get("severity"),
+        case.get("note"),
+        case.get("next_step"),
+        *[value for item in evidence for value in [item.get("agent"), item.get("row"), item.get("station"), item.get("value"), item.get("source_image")]],
+    ] if part is not None).lower()
+    if any(agent == "table6-potentials" for agent in agents):
+        return "potential-minus-sign-discipline"
+    if any(agent.startswith("table3-") for agent in agents):
+        if re.search(r"five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four", text):
+            return "table3-five-reading-completeness"
+        return "potential-minus-sign-discipline"
+    if any(agent in {"table4-stations", "table5-currents"} for agent in agents) and re.search(r"current|shunt|\bma\b|\bmv\b|decimal|6369|4386|345\.7|295\.1|far from peer|outlier", text):
         return "table4-current-decimal-scale"
-    if re.search(r"\btable\s*3\b|table3", text) and re.search(r"five|5\s+values|expected\s+five|expected\s+5|only\s+four|4\s+data|missing|count", text):
+    if re.search(r"\btable\s*3\b|table3", text) and re.search(r"five\s+readings|5\s+readings|5\s+values|expected\s+five|expected\s+5|only\s+four|only\s+4|4\s+data|row\s+count|value\s+count|has\s+four", text):
         return "table3-five-reading-completeness"
     if re.search(r"station|anode|\bmg\b|pair|coverage|group", text) and re.search(r"\btable\s*5\b|table5|\btable\s*6\b|table6|potential|current", text):
         return "station-pairing-coverage"
@@ -175,6 +201,7 @@ def prompt_for_case(case: dict, solution_id: str | None = None) -> str:
             "solution_id": solution_id,
             "title": solution_rule.get("title") if solution_rule else None,
             "instruction": solution_rule.get("prompt") if solution_rule else None,
+            "human_feedback": solution_feedback(solution_id),
         },
         "case": {
             "title": case.get("title"),
@@ -186,6 +213,7 @@ def prompt_for_case(case: dict, solution_id: str | None = None) -> str:
         "domain_rules": [
             "Do not use the old extracted value as truth; it is the suspect value.",
             "Table 3 and Table 6 potentials are normally negative; preserve visible minus signs and consider reverse polarity/missing minus in notes.",
+            "If a Table 3 or Table 6 source image clearly shows no minus sign, do not invent a minus sign; keep the source-backed positive value and flag it as polarity/source-positive review.",
             "Table 4 current readings are normally mA, not A. Table 4 shunt readings are normally mV.",
             "Large un-decimaled current values like 6369/4386 are likely missed decimal readings if the display visually supports 63.69/43.86.",
             "Tiny Table 3 values around 0.08 beside peers around 0.8 may indicate missed digit/decimal; inspect the LCD carefully.",
