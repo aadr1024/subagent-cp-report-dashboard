@@ -1702,13 +1702,17 @@ main {
 }
 
 .floating-preview {
-  display: block;
+  display: none;
   position: fixed;
   max-height: calc(100vh - 96px);
   overflow: auto;
   text-align: left;
   z-index: 120;
   pointer-events: auto;
+}
+
+.floating-preview.is-visible {
+  display: block;
 }
 
 .anomaly-actions {

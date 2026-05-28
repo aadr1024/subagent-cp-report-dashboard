@@ -25,6 +25,7 @@ let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
 let latestFeedbackStatus = null;
 let latestRegressionCases = [];
+let anomalyFloatingPreview = null;
 
 function loadFeedbackConsole() {
   try {
@@ -1512,7 +1513,8 @@ function hideFloatingPreview() {
     floatingPreviewHideTimer = null;
   }
   if (!activeFloatingPreview) return;
-  activeFloatingPreview.remove();
+  activeFloatingPreview.classList.remove("is-visible");
+  activeFloatingPreview.style.display = "none";
   activeFloatingPreview = null;
 }
 
@@ -1545,16 +1547,24 @@ function positionFloatingPreview(preview, pointer) {
   preview.style.top = `${top}px`;
 }
 
+function ensureAnomalyFloatingPreview() {
+  if (anomalyFloatingPreview) return anomalyFloatingPreview;
+  const node = document.createElement("div");
+  node.id = "anomalyFloatingPreview";
+  node.className = "hover-preview anomaly-preview floating-preview";
+  node.style.display = "none";
+  node.addEventListener("mouseenter", cancelFloatingPreviewHide);
+  node.addEventListener("mouseleave", scheduleFloatingPreviewHide);
+  document.body.appendChild(node);
+  anomalyFloatingPreview = node;
+  return node;
+}
+
 function showAnomalyFloatingPreview(chip, event) {
   if (!chip?.dataset.previewSrc) return null;
-  if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor) {
-    positionFloatingPreview(activeFloatingPreview, event);
-    return activeFloatingPreview;
-  }
-  hideFloatingPreview();
   if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
-  const node = document.createElement("div");
-  node.className = "hover-preview anomaly-preview floating-preview";
+  const node = ensureAnomalyFloatingPreview();
+  delete node.dataset.loaded;
   node.dataset.neighborhood = chip.dataset.neighborhood || "";
   node.innerHTML = `<div class="hover-current">
       <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" decoding="async" fetchpriority="low" />
@@ -1564,10 +1574,9 @@ function showAnomalyFloatingPreview(chip, event) {
       <div class="neighbor-loading">hover: loading validation image context</div>
     </div>`;
   node.dataset.anchorId = chip.dataset.previewAnchor;
-  node.addEventListener("mouseenter", cancelFloatingPreviewHide);
-  node.addEventListener("mouseleave", scheduleFloatingPreviewHide);
-  document.body.appendChild(node);
   activeFloatingPreview = node;
+  node.style.display = "block";
+  node.classList.add("is-visible");
   positionFloatingPreview(node, event);
   hydrateHoverPreview(node);
   return node;
