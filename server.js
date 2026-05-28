@@ -355,7 +355,11 @@ async function saveValidationNote(req, res) {
   };
   fs.appendFileSync(path.join(dir, "notes.jsonl"), JSON.stringify(note) + "\n");
   fs.appendFileSync(VALIDATION_REVIEW_METADATA, JSON.stringify(note) + "\n");
-  json(res, 200, { ok: true, note });
+  let regression_case = null;
+  if (note.status === "reviewed" && noteLooksLikeErrorCase(note.note)) {
+    regression_case = appendRegressionCaseFromAnomaly(validationId, note.anomaly_id, anomaly, note.note, "review_note");
+  }
+  json(res, 200, { ok: true, note, regression_case });
 }
 
 function regressionCases() {
@@ -367,6 +371,10 @@ function regressionCases() {
   return [...latestBySignature.values()].reverse();
 }
 
+function noteLooksLikeErrorCase(note) {
+  return /\b(error|bug|wrong|incorrect|bad|repeat|repeated|regression|fix|should|missing|mismatch|anomaly|problem|issue)\b/i.test(String(note || ""));
+}
+
 async function recordRegressionCase(req, res) {
   const payload = JSON.parse((await readBody(req)) || "{}");
   const validationId = String(payload.validation_id || "").replace(/[^a-zA-Z0-9_.-]/g, "");
@@ -376,6 +384,11 @@ async function recordRegressionCase(req, res) {
   const state = readJsonFile(path.join(dir, "state.json"), {});
   const anomaly = (state.anomalies || []).find((item) => item.id === anomalyId);
   if (!anomaly) return json(res, 404, { error: "unknown anomaly" });
+  const item = appendRegressionCaseFromAnomaly(validationId, anomalyId, anomaly, payload.note || "", "manual_record");
+  json(res, 200, { ok: true, item });
+}
+
+function appendRegressionCaseFromAnomaly(validationId, anomalyId, anomaly, note, source = "review_note") {
   const item = {
     at: new Date().toISOString(),
     case_id: `${validationId}:${anomalyId}`,
@@ -384,23 +397,25 @@ async function recordRegressionCase(req, res) {
     signature: anomaly.signature || null,
     evidence_hash: anomaly.evidence_hash || null,
     status: "recorded",
+    source,
     title: anomaly.title,
     kind: anomaly.kind,
     severity: anomaly.severity,
-    note: payload.note || "",
+    note: note || "",
     anomaly,
-    next_step: "Run a focused regression check to reproduce this scenario and verify whether a later extraction/validation still flags it.",
+    next_step: "Focused rerun target: reproduce this scenario and verify whether a later extraction/validation still flags it.",
   };
   fs.appendFileSync(REGRESSION_CASES, JSON.stringify(item) + "\n");
   fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
     at: item.at,
     kind: "regression_case_recorded",
+    source,
     validation_id: validationId,
     anomaly_id: anomalyId,
     signature: item.signature,
     title: item.title,
   }) + "\n");
-  json(res, 200, { ok: true, item });
+  return item;
 }
 
 function secondsBetween(a, b) {

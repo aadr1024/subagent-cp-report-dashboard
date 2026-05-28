@@ -884,10 +884,8 @@ function renderAnomalyCard(validationId, item, contextGroups = []) {
     <div class="anomaly-evidence">${evidence.map((evidenceItem) => renderAnomalyEvidence(evidenceItem, evidence, contextGroups)).join("")}</div>
     <div class="anomaly-actions">
       <input class="anomaly-note-input" placeholder="Add reviewer note before saving" value="${escapeHtml(draftNote)}" />
-      <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved" : "Save"}</button>
-      <button class="small-btn good-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Good job</button>
-      <button class="small-btn mark-reviewed" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Mark reviewed</button>
-      <button class="small-btn record-regression" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Record error case</button>
+      <button class="small-btn save-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">${item.saved_note ? "Saved review" : "Save review"}</button>
+      <button class="small-btn good-anomaly" data-validation-id="${escapeHtml(validationId || "")}" data-anomaly-id="${escapeHtml(item.id || "")}">Looks good</button>
       <small class="anomaly-route">Saved here as validation metadata. It does not edit the DOCX; run-board value feedback is stored separately for future agent prompts.</small>
     </div>
   </article>`;
@@ -978,7 +976,7 @@ async function saveAnomaly(button, status = "saved") {
   const payload = {
     validation_id: button.dataset.validationId,
     anomaly_id: button.dataset.anomalyId,
-    status,
+    status: status === "saved" ? "reviewed" : status,
     note,
   };
   const res = await fetch("/api/validation/save", {
@@ -988,8 +986,9 @@ async function saveAnomaly(button, status = "saved") {
   });
   if (res.ok) {
     anomalyNoteDrafts.delete(payload.anomaly_id);
-    const label = status === "reviewed" ? "reviewed" : status === "good" ? "looks good" : "saved";
-    button.textContent = status === "reviewed" ? "Reviewed" : status === "good" ? "Looks good" : "Saved";
+    const effectiveStatus = payload.status;
+    const label = effectiveStatus === "reviewed" ? "reviewed" : effectiveStatus === "good" ? "looks good" : "saved";
+    button.textContent = effectiveStatus === "reviewed" ? "Saved review" : effectiveStatus === "good" ? "Looks good" : "Saved";
     card?.classList.add("reviewed");
     const tags = card?.querySelector(".anomaly-tags");
     if (tags && !tags.querySelector("mark.reviewed")) {
@@ -999,7 +998,7 @@ async function saveAnomaly(button, status = "saved") {
       if (reviewed) reviewed.textContent = label;
     }
     const route = card?.querySelector(".anomaly-route");
-    if (route) route.textContent = `${label} · persisted as validation metadata; future unchanged repeats can be suppressed.`;
+    if (route) route.textContent = `${label} · persisted as validation metadata; error-case ledger is updated automatically when your note describes a repeatable issue.`;
     pollValidation();
     pollFeedbackStatus();
   }
@@ -1478,10 +1477,6 @@ document.addEventListener("click", (event) => {
   if (save) saveAnomaly(save, "saved");
   const good = event.target.closest(".good-anomaly");
   if (good) saveAnomaly(good, "good");
-  const reviewed = event.target.closest(".mark-reviewed");
-  if (reviewed) saveAnomaly(reviewed, "reviewed");
-  const regression = event.target.closest(".record-regression");
-  if (regression) recordRegressionCase(regression);
   const chip = event.target.closest(".reading-chip");
   if (chip && !event.target.closest(".hover-preview, .quick-feedback, .editable-label")) openQuickFeedback(chip);
 });
