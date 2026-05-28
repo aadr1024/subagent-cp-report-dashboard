@@ -2,7 +2,7 @@
 
 Read when changing validation feedback, regression rechecks, or dashboard replay behavior.
 
-The dashboard separates three layers:
+The dashboard keeps these validation-review layers together inside the Validation Review Workbench:
 
 - Validation anomalies: latest dataset review findings.
 - Regression cases: durable records of reviewed error scenarios with source evidence.

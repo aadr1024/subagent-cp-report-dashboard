@@ -81,31 +81,39 @@
         <div id="validationPanel" class="validation-panel"></div>
       </section>
 
-      <section class="panel launcher-panel">
+      <section class="panel launcher-panel validation-workbench-panel">
         <div class="panel-head">
-          <h2>Feedback Lifecycle</h2>
-          <span id="feedbackLifecycleUpdated">feedback metadata loading</span>
+          <h2>Validation Review Workbench</h2>
+          <span>solution replay, error ledger, feedback memory</span>
         </div>
-        <div id="feedbackLifecycle" class="feedback-lifecycle"></div>
-      </section>
+        <div class="validation-workbench">
+          <section class="workbench-section solution-workbench">
+            <div class="workbench-head">
+              <h3>General Solution Replay Suite</h3>
+              <span id="solutionSuiteUpdated">solution classes loading</span>
+            </div>
+            <div id="solutionSuite" class="solution-suite"></div>
+          </section>
 
-      <section class="panel launcher-panel">
-        <div class="panel-head">
-          <h2>General Solution Replay Suite</h2>
-          <span id="solutionSuiteUpdated">solution classes loading</span>
-        </div>
-        <div id="solutionSuite" class="solution-suite"></div>
-      </section>
+          <section class="workbench-section regression-workbench">
+            <div class="workbench-head">
+              <h3>Error Regression Ledger</h3>
+              <div class="board-tools">
+                <span id="regressionUpdated">no cases recorded</span>
+                <button id="startRegressionRecheckBtn" class="small-btn" type="button">Run focused rechecks</button>
+              </div>
+            </div>
+            <div id="regressionLedger" class="regression-ledger"></div>
+          </section>
 
-      <section class="panel launcher-panel">
-        <div class="panel-head">
-          <h2>Error Regression Ledger</h2>
-          <div class="board-tools">
-            <span id="regressionUpdated">no cases recorded</span>
-            <button id="startRegressionRecheckBtn" class="small-btn" type="button">Run focused rechecks</button>
+          <section class="workbench-section feedback-workbench">
+            <div class="workbench-head">
+              <h3>Feedback Lifecycle</h3>
+              <span id="feedbackLifecycleUpdated">feedback metadata loading</span>
+            </div>
+            <div id="feedbackLifecycle" class="feedback-lifecycle"></div>
+          </section>
           </div>
-        </div>
-        <div id="regressionLedger" class="regression-ledger"></div>
       </section>
 
       <section class="panel">

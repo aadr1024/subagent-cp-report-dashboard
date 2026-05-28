@@ -56,7 +56,8 @@ body {
 }
 
 h1,
-h2 {
+h2,
+h3 {
   margin: 0;
   letter-spacing: 0;
 }
@@ -69,6 +70,10 @@ h1 {
 
 h2 {
   font-size: 16px;
+}
+
+h3 {
+  font-size: 13px;
 }
 
 .controls {
@@ -1750,10 +1755,81 @@ main {
   font-size: 10px;
 }
 
+.validation-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.75fr);
+  grid-template-areas:
+    "solution regression"
+    "feedback feedback";
+  gap: 12px;
+  padding: 14px;
+}
+
+.workbench-section {
+  overflow: hidden;
+  border: 1px solid rgba(217, 209, 194, 0.86);
+  border-radius: 13px;
+  background: rgba(255, 253, 247, 0.68);
+}
+
+.solution-workbench {
+  grid-area: solution;
+}
+
+.regression-workbench {
+  grid-area: regression;
+}
+
+.feedback-workbench {
+  grid-area: feedback;
+  opacity: 0.9;
+}
+
+.workbench-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(217, 209, 194, 0.82);
+  background: rgba(251, 242, 226, 0.7);
+}
+
+.workbench-head span,
+.workbench-head .board-tools span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .feedback-lifecycle,
 .solution-suite,
 .regression-ledger {
-  padding: 14px;
+  padding: 12px;
+}
+
+.feedback-workbench .feedback-lifecycle {
+  padding: 10px;
+}
+
+.feedback-workbench .stat-card {
+  padding: 8px 10px;
+}
+
+.feedback-workbench .stat-card strong {
+  font-size: 18px;
+}
+
+.feedback-workbench .feedback-life-grid {
+  margin-top: 8px;
+}
+
+.feedback-workbench .feedback-life-list {
+  max-height: 128px;
+}
+
+.regression-workbench .regression-list {
+  max-height: 520px;
 }
 
 .feedback-life-cards {
@@ -1786,8 +1862,11 @@ main {
 }
 
 .solution-list {
-  max-height: 760px;
+  max-height: min(760px, 76vh);
   gap: 12px;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
 }
 
 .solution-card {
@@ -2214,9 +2293,17 @@ main {
   .validation-explain,
   .solution-summary,
   .solution-body,
+  .validation-workbench,
   .stats-grid,
   .run-layout {
     grid-template-columns: 1fr;
+  }
+
+  .validation-workbench {
+    grid-template-areas:
+      "solution"
+      "regression"
+      "feedback";
   }
 
   .anomaly-actions {

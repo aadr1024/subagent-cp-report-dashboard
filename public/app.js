@@ -25,6 +25,7 @@ let activityEvents = [];
 let activityRuns = [];
 let activityUpdatedAt = null;
 let latestValidation = null;
+let lastSolutionRenderKey = "";
 let activeFloatingPreview = null;
 let floatingPreviewHideTimer = null;
 let latestFeedbackStatus = null;
@@ -608,7 +609,11 @@ function dashboardScrollSnapshot() {
 }
 
 function scrollablePanelBusy() {
-  return Date.now() < scrollablePanelQuietUntil || Date.now() < validationEditLockUntil || anomalyNoteDrafts.size > 0 || editingDashboardPanel();
+  return Date.now() < scrollablePanelQuietUntil
+    || Date.now() < validationEditLockUntil
+    || anomalyNoteDrafts.size > 0
+    || Boolean(document.querySelector("#solutionSuite:hover, #solutionSuite:focus-within"))
+    || editingDashboardPanel();
 }
 
 function editingDashboardPanel() {
@@ -631,8 +636,10 @@ function rememberAnomalyDraft(input) {
 }
 
 function markScrollablePanelBusy(event) {
-  if (!event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts")) return;
-  scrollablePanelQuietUntil = Date.now() + 700;
+  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
+  if (!target) return;
+  const quietMs = target.closest("#solutionSuite .solution-list") ? 6000 : 1600;
+  scrollablePanelQuietUntil = Date.now() + quietMs;
 }
 
 function renderFoldRail() {
@@ -1068,17 +1075,38 @@ async function pollFeedbackStatus() {
   } catch {}
 }
 
+function solutionRenderKey(payload) {
+  return JSON.stringify({
+    totals: payload.totals || {},
+    solutions: (payload.solutions || []).map((solution) => ({
+      id: solution.solution_id,
+      status: solution.status,
+      counts: solution.counts,
+      latest: solution.latest_recheck_id,
+      cases: (solution.cases || []).map((item) => ({
+        signature: item.signature,
+        outcome: item.outcome,
+        recheck: item.result?.recheck_id || null,
+        result_status: item.result?.status || null,
+      })),
+    })),
+  });
+}
+
 function renderSolutionSuite(payload) {
   latestRegressionSolutions = payload.solutions || [];
   const panel = $("solutionSuite");
   if (!panel) return;
+  const renderKey = solutionRenderKey(payload);
+  const totals = payload.totals || {};
+  $("solutionSuiteUpdated").textContent = `${totals.solutions || 0} solution class${totals.solutions === 1 ? "" : "es"} · ${totals.solved || 0}/${totals.cases || 0} solved`;
+  if (panel.innerHTML.trim() && renderKey === lastSolutionRenderKey) return;
   if (scrollablePanelBusy() && panel.innerHTML.trim()) {
     pendingSolutionRender = payload;
     return;
   }
   const scrollSnapshot = dashboardScrollSnapshot();
-  const totals = payload.totals || {};
-  $("solutionSuiteUpdated").textContent = `${totals.solutions || 0} solution class${totals.solutions === 1 ? "" : "es"} · ${totals.solved || 0}/${totals.cases || 0} solved`;
+  lastSolutionRenderKey = renderKey;
   panel.innerHTML = latestRegressionSolutions.length ? `<div class="solution-summary">
       <div class="stat-card"><span>Solution classes</span><strong>${totals.solutions || 0}</strong><small>general reusable fixes</small></div>
       <div class="stat-card"><span>Replay cases</span><strong>${totals.cases || 0}</strong><small><mark class="ok">${totals.solved || 0} solved</mark> <mark class="bad">${totals.open || 0} open</mark> <mark class="hot">${totals.needs_review || 0} review</mark></small></div>
