@@ -4,20 +4,25 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src")
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = Path(os.environ.get("CP_REPORT_CONFIG") or (ROOT / "report-source-of-truth.local.json" if (ROOT / "report-source-of-truth.local.json").exists() else ROOT / "report-source-of-truth.json"))
+CONFIG = json.loads(CONFIG_PATH.read_text())
+REPORT_TOOL_SRC = os.environ.get("SBA_REPORT_TOOL_SRC") or CONFIG.get("report_tool_src") or ""
+if REPORT_TOOL_SRC:
+    sys.path.insert(0, str(Path(REPORT_TOOL_SRC).expanduser()))
 
 from sba_report_tool.openai_api import create_response, response_text
 
 import docx_review
 
 
-ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 VALIDATIONS = RUNS / "validations"
 VALIDATION_REVIEW_METADATA = RUNS / "validation-review-metadata.jsonl"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,18 +13,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src")
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = Path(os.environ.get("CP_REPORT_CONFIG") or (ROOT / "report-source-of-truth.local.json" if (ROOT / "report-source-of-truth.local.json").exists() else ROOT / "report-source-of-truth.json"))
+CONFIG = json.loads(CONFIG_PATH.read_text())
+REPORT_TOOL_SRC = os.environ.get("SBA_REPORT_TOOL_SRC") or CONFIG.get("report_tool_src") or ""
+if REPORT_TOOL_SRC:
+    sys.path.insert(0, str(Path(REPORT_TOOL_SRC).expanduser()))
 
 from sba_report_tool.docx_ops import NS, extract_text, load_docx_parts
 from sba_report_tool.openai_api import as_input_image, create_response, response_text
 
 
-ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 CURRENT = RUNS / "current-run.txt"
-REPORT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L .docx")
-SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
-ANNOTATIONS = Path("/Users/aadityarajesh/Downloads/all_scripts/streamlit-image-mt/variations/j260101-article-reports/.j260101-article-reports-annotations.json")
+REPORT = Path(os.environ.get("CP_REPORT_ORIGINAL_DOCX") or CONFIG["original_docx"]).expanduser()
+SITE_ROOT = Path(os.environ.get("CP_REPORT_SITE_ROOT") or CONFIG.get("site_root", ROOT / "site-photos")).expanduser()
+ANNOTATIONS = Path(os.environ.get("CP_REPORT_ANNOTATIONS") or CONFIG.get("annotation_source", "")).expanduser()
+HEADING_PATTERN = CONFIG.get("heading_pattern", "STR")
+HEADING_TO_WRITE_TEMPLATE = CONFIG.get("heading_to_write_template", "STR {structure}")
 MODEL = "gpt-5.2"
 GLOBAL_FEEDBACK = RUNS / "global-feedback.jsonl"
 FEEDBACK_PROCESSING = RUNS / "feedback-processing.jsonl"
@@ -226,7 +233,7 @@ def heading_body_index_for_ordinal(ordinal: int) -> int | None:
         return None
     hits = []
     for i, child in enumerate(list(body)):
-        if child.tag.endswith("}p") and re.search(r"962L/986L\s*STR", extract_text(child).replace("\xa0", " ")):
+        if child.tag.endswith("}p") and re.search(HEADING_PATTERN, extract_text(child).replace("\xa0", " ")):
             hits.append(i)
     return hits[ordinal - 1] if ordinal <= len(hits) else None
 
@@ -401,7 +408,7 @@ def main() -> None:
             "source_folder": str(folder),
             "target_tables": tables,
             "heading_body_index": heading_index,
-            "heading_to_write": f"962L/986L STR {args.structure}",
+            "heading_to_write": HEADING_TO_WRITE_TEMPLATE.format(structure=args.structure),
             "report": str(REPORT),
         }
         log.write_state()

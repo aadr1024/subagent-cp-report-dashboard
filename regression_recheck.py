@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 import re
 import subprocess
 import sys
@@ -11,16 +12,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src")
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = Path(os.environ.get("CP_REPORT_CONFIG") or (ROOT / "report-source-of-truth.local.json" if (ROOT / "report-source-of-truth.local.json").exists() else ROOT / "report-source-of-truth.json"))
+CONFIG = json.loads(CONFIG_PATH.read_text())
+REPORT_TOOL_SRC = os.environ.get("SBA_REPORT_TOOL_SRC") or CONFIG.get("report_tool_src") or ""
+if REPORT_TOOL_SRC:
+    sys.path.insert(0, str(Path(REPORT_TOOL_SRC).expanduser()))
 
 from sba_report_tool.openai_api import as_input_image, create_response, response_text
 
 from correction_promoter import promote_results
 
 
-ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
-SITE_ROOT = Path("/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos")
+SITE_ROOT = Path(os.environ.get("CP_REPORT_SITE_ROOT") or CONFIG.get("site_root", ROOT / "site-photos")).expanduser()
 REGRESSION_CASES = RUNS / "regression-cases.jsonl"
 SOLUTION_FEEDBACK = RUNS / "solution-feedback.jsonl"
 RECHECKS = RUNS / "regression-rechecks"

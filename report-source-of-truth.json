@@ -1,8 +1,14 @@
 {
-  "project": "J260101 CP Installation Report CETO 962L-986L",
-  "original_docx": "/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L .docx",
-  "working_final_docx": "/Users/aadityarajesh/Downloads/MT/j260101 local/CP installation report/CP Installation Report___CETO 962L-986L__subagent-dashboard-FINAL.docx",
+  "project": "Example CP installation report",
+  "original_docx": "./example/input-report.docx",
+  "working_final_docx": "./example/output-report-final.docx",
+  "site_root": "./example/site-photos",
+  "annotation_source": "./example/annotations.json",
+  "report_tool_src": "",
+  "heading_pattern": "STR",
+  "heading_to_write_template": "STR {structure}",
+  "single_output_name_template": "report-subagent-dashboard-STR{structure}.docx",
   "active_output_role": "working_final_docx",
   "never_write_original": true,
-  "rule": "All dashboard writers and open actions must resolve the active report from this manifest. The original DOCX is read-only seed input."
+  "rule": "All dashboard writers and open actions must resolve the active report from this manifest. The original DOCX is read-only seed input. Put real customer/local paths in ignored report-source-of-truth.local.json."
 }

@@ -483,7 +483,7 @@ function renderRunBoards(states) {
           <header class="run-head focus-run" data-run-id="${escapeHtml(state.run_id)}">
             <div>
               <div class="eyebrow">STR ${escapeHtml(state.structure || "?")} · ${escapeHtml(state.run_id || "")}</div>
-              <h2>${escapeHtml(target.heading_to_write || `962L/986L STR ${state.structure || "?"}`)}</h2>
+              <h2>${escapeHtml(target.heading_to_write || `STR ${state.structure || "?"}`)}</h2>
               <div class="message">ordinal ${target.ordinal || "?"} · ${escapeHtml(versionText)}${isLatestRun ? "" : " · viewing older run"} · tables ${tables} · folder ${escapeHtml(folderName || "?")} · updated ${fmtTime(state.updated_at)}</div>
               ${output}
             </div>
@@ -1069,6 +1069,42 @@ function docxLockKey(structure, slot) {
   return slot.lock_key || [structure, slot.table_index ?? "", slot.row_index ?? "", slot.col_index ?? ""].join("|");
 }
 
+function docxSourceRange(slot) {
+  return [slot.source_ref, ...(slot.source_refs || [])].filter(imageLike)
+    .filter((value, index, list) => list.indexOf(value) === index);
+}
+
+function renderDocxSourceCorrectionPanel(slot) {
+  const sources = docxSourceRange(slot);
+  const correction = slot.source_correction || null;
+  const original = slot.original_source_refs || [];
+  const history = slot.source_corrections || [];
+  const sourceChips = sources.length
+    ? sources.map((source, index) => `<span class="docx-source-chip ${index === 0 ? "primary" : ""}">${escapeHtml(source)}</span>`).join("")
+    : `<span class="docx-source-chip missing">no source image</span>`;
+  const originalLine = correction && original.length
+    ? `<small>original: ${escapeHtml(original.join(" → "))}</small>`
+    : "";
+  return `<div class="docx-source-correction ${correction ? "active" : ""}">
+    <div class="docx-source-head">
+      <strong>${correction ? "source range corrected" : "source range"}</strong>
+      <span>${history.length ? `${history.length} correction event${history.length === 1 ? "" : "s"}` : "no correction events"}</span>
+    </div>
+    <div class="docx-source-strip">${sourceChips}</div>
+    ${originalLine}
+    <div class="docx-source-actions">
+      <button class="small-btn docx-source-correct" data-correction-action="shift_prev" type="button">← shift</button>
+      <button class="small-btn docx-source-correct" data-correction-action="shift_next" type="button">shift →</button>
+      <button class="small-btn docx-source-correct" data-correction-action="extend_start" type="button">+ before</button>
+      <button class="small-btn docx-source-correct" data-correction-action="extend_end" type="button">+ after</button>
+      <button class="small-btn docx-source-correct" data-correction-action="trim_start" type="button">trim first</button>
+      <button class="small-btn docx-source-correct" data-correction-action="trim_end" type="button">trim last</button>
+      <button class="small-btn docx-source-correct reset" data-correction-action="reset" type="button">reset</button>
+    </div>
+    <input class="docx-source-note" type="text" placeholder="optional note for this source-range correction" />
+  </div>`;
+}
+
 function docxRiskForSlot(slot) {
   const status = slot.status || "blank";
   if (["missing_write", "mismatch", "patch_error", "derived_mismatch", "locked_drift", "locked_write_attempt"].includes(status)) return "blocking";
@@ -1112,7 +1148,7 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
   const status = slot.status || "blank";
   const structure = String(structureItem?.structure || "");
   const folder = knownStructures.find((entry) => String(entry.structure) === structure)?.folder || "";
-  const sources = [slot.source_ref, ...(slot.source_refs || [])].filter(imageLike);
+  const sources = docxSourceRange(slot);
   const image = sources[0] || "";
   const previewHref = folder && image ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(image)}?size=760` : "";
   const neighborhood = folder && image ? `/api/image-neighborhood?folder=${encodeURIComponent(folder)}&image=${encodeURIComponent(image)}&limit=21` : "";
@@ -1123,15 +1159,17 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
   const feedback = slot.feedback || [];
   const reviewed = feedback.some((item) => ["good", "reviewed", "ok"].includes(String(item.status || "").toLowerCase()));
   const locked = Boolean(slot.locked);
+  const sourceCorrected = Boolean(slot.source_correction);
   const draft = docxReviewDrafts.has(slotKey) ? docxReviewDrafts.get(slotKey) : "";
   const meta = [
     expected ? `expected ${expected}` : "no extracted value",
     slot.derived_expected ? `derived ${slot.derived_expected}` : "",
     slot.writer_expected ? `writer expected ${slot.writer_expected}` : "",
     slot.source_ref ? `source ${slot.source_ref}` : "",
+    sourceCorrected ? "reviewer-corrected source range" : "",
     slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
   ].filter(Boolean).join(" · ");
-  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
+  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${sourceCorrected ? "source-corrected" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
     data-slot-key="${escapeHtml(slotKey)}"
     data-lock-key="${escapeHtml(lockKey)}"
     data-structure="${escapeHtml(structure)}"
@@ -1143,6 +1181,7 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
     data-actual="${escapeHtml(actual)}"
     data-expected="${escapeHtml(expected)}"
     data-source-refs="${escapeHtml(JSON.stringify(sources))}"
+    data-source-correction="${escapeHtml(JSON.stringify(slot.source_correction || null))}"
     data-preview-src="${escapeHtml(previewHref)}"
     data-preview-title="${escapeHtml(previewTitle)}"
     data-neighborhood="${escapeHtml(neighborhood)}"
@@ -1155,6 +1194,7 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
       <button class="docx-toggle-review small-btn" type="button">Review</button>
       <button class="${locked ? "docx-unlock" : "docx-lock"} small-btn" type="button">${locked ? "Unlock" : "Lock"}</button>
     </div>
+    ${renderDocxSourceCorrectionPanel(slot)}
     <div class="docx-cell-feedback">
       <textarea class="docx-review-input" rows="2" placeholder="Review this DOCX cell">${escapeHtml(draft)}</textarea>
       <button class="save-docx-review small-btn" type="button">Save review</button>
@@ -1314,6 +1354,8 @@ function docxReviewRenderKey(payload) {
         l: Boolean(slot.locked),
         lv: slot.locked_value || "",
         f: (slot.feedback || []).length,
+        sc: slot.source_correction?.correction_id || "",
+        sr: (slot.source_refs || []).join("|"),
       })),
     })),
   });
@@ -1347,6 +1389,7 @@ function renderDocxReview(payload) {
     <div class="stat-card"><span>Blanks</span><strong>${Number(summary.blank || 0)}</strong><small>visible empty slots</small></div>
     <div class="stat-card"><span>Blocking</span><strong>${Number(summary.problem || 0)}</strong><small>missing write / mismatch / patch issue</small></div>
     <div class="stat-card"><span>Locked drift</span><strong>${Number(summary.locked_drift || 0) + Number(summary.locked_write_attempt || 0)}</strong><small>changed or attempted overwrite</small></div>
+    <div class="stat-card"><span>Source fixes</span><strong>${Number(summary.source_corrected || 0)}</strong><small>reviewer-corrected evidence ranges</small></div>
   </div>
   ${renderDocxRiskControls(structures)}
   <div class="validation-note">This panel reads the final DOCX file and compares it against the same cell patches used by the DOCX writer. If Word saves a manual change, the next refresh reflects the saved document state.</div>
@@ -2063,6 +2106,54 @@ async function saveDocxCellLock(button, action = "lock", note = "") {
   pollActivity();
 }
 
+async function saveDocxSourceCorrection(button) {
+  const cell = button.closest(".docx-cell");
+  if (!cell?.dataset.slotKey) return;
+  const action = button.dataset.correctionAction || "shift_next";
+  let sourceRefs = [];
+  try { sourceRefs = JSON.parse(cell.dataset.sourceRefs || "[]"); } catch {}
+  const noteInput = cell.querySelector(".docx-source-note");
+  button.disabled = true;
+  button.textContent = action === "reset" ? "Resetting" : "Saving";
+  const res = await fetch("/api/docx-review/correction", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      slot_key: cell.dataset.slotKey,
+      lock_key: cell.dataset.lockKey,
+      structure: cell.dataset.structure,
+      table_key: cell.dataset.tableKey,
+      label: cell.dataset.label,
+      row_index: cell.dataset.rowIndex,
+      col_index: cell.dataset.colIndex,
+      cell_status: cell.dataset.cellStatus,
+      actual: cell.dataset.actual,
+      expected: cell.dataset.expected,
+      source_refs: sourceRefs,
+      note: noteInput?.value || "",
+    }),
+  });
+  button.disabled = false;
+  button.textContent = res.ok ? "Saved" : "Save failed";
+  /*
+   * Do not make a browser-only optimistic source-range mutation here. The save
+   * path must round-trip through `/api/docx-review/correction`, then
+   * `docx_review.py` must replay the append-only ledger into the next payload.
+   * That gives the reviewer a stronger guarantee: if a corrected image range is
+   * visible in the DOCX Review panel, the backend and future agents can read the
+   * same correction from the durable ledger.
+   */
+  if (res.ok) {
+    if (noteInput) noteInput.value = "";
+    cell.classList.add("source-corrected");
+  }
+  setTimeout(() => { button.textContent = action === "reset" ? "reset" : action.replaceAll("_", " "); }, 1200);
+  pollDocxReview();
+  pollDashboardValidation("locked-docx-cell-drift-monitor");
+  pollActivity();
+}
+
 function docxReviewCells() {
   return [...document.querySelectorAll("#docxReviewPanel .docx-cell[data-slot-key]")];
 }
@@ -2703,6 +2794,8 @@ document.addEventListener("click", (event) => {
   }
   const docxSave = event.target.closest(".save-docx-review");
   if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
+  const docxSourceCorrection = event.target.closest(".docx-source-correct");
+  if (docxSourceCorrection) saveDocxSourceCorrection(docxSourceCorrection);
   const docxLock = event.target.closest(".docx-lock");
   if (docxLock) saveDocxCellLock(docxLock, "lock", "Locked from DOCX Review");
   const docxUnlock = event.target.closest(".docx-unlock");

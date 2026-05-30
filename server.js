@@ -7,6 +7,7 @@ const { spawn, spawnSync } = require("child_process");
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 const REPORT_SOURCE_OF_TRUTH = path.join(ROOT, "report-source-of-truth.json");
+const LOCAL_REPORT_SOURCE_OF_TRUTH = path.join(ROOT, "report-source-of-truth.local.json");
 const RUNS = path.join(ROOT, "runs");
 const CURRENT = path.join(RUNS, "current-run.txt");
 const GLOBAL_FEEDBACK = path.join(RUNS, "global-feedback.jsonl");
@@ -24,10 +25,14 @@ const CLOSED_LOOP_STATUS = path.join(RUNS, "closed-loop-status.json");
 const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.json");
 const DOCX_REVIEW_FEEDBACK = path.join(RUNS, "docx-review-feedback.jsonl");
 const DOCX_CELL_LOCKS = path.join(RUNS, "docx-cell-locks.jsonl");
+const DOCX_SOURCE_CORRECTIONS = path.join(RUNS, "docx-source-corrections.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
-const SBA_SRC = "/Users/aadityarajesh/Downloads/MT/us-mike-carose-soil-data-2026/J260106 - SBA (anchor inspections Y-2026) -- in process/src";
-const SITE_ROOT = "/Users/aadityarajesh/Downloads/MT/j260101 local/site-photos";
+const PUBLIC_CONFIG = readJsonFile(REPORT_SOURCE_OF_TRUTH, {});
+const LOCAL_CONFIG = readJsonFile(process.env.CP_REPORT_CONFIG || LOCAL_REPORT_SOURCE_OF_TRUTH, PUBLIC_CONFIG);
+const CONFIG = { ...PUBLIC_CONFIG, ...LOCAL_CONFIG };
+const SBA_SRC = process.env.SBA_REPORT_TOOL_SRC || CONFIG.report_tool_src || "";
+const SITE_ROOT = process.env.CP_REPORT_SITE_ROOT || CONFIG.site_root || path.join(ROOT, "site-photos");
 const SOLUTION_DEFINITIONS = {
   "potential-minus-sign-discipline": {
     title: "Potential sign discipline",
@@ -116,7 +121,7 @@ function readJsonFile(file, fallback) {
 }
 
 function reportSourceOfTruth() {
-  const data = readJsonFile(REPORT_SOURCE_OF_TRUTH, {});
+  const data = CONFIG;
   const role = data.active_output_role || "working_final_docx";
   const activeRaw = data[role] || data.working_final_docx || "";
   const originalRaw = data.original_docx || "";
@@ -1527,6 +1532,115 @@ function imageNeighborhood(req, res, url) {
   });
 }
 
+function uniqueStrings(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of values || []) {
+    const clean = String(value || "").trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function siteImageListForStructure(structure) {
+  const match = listStructures().find((item) => String(item.structure) === String(structure));
+  if (!match) return { folder: "", images: [] };
+  const dir = path.resolve(SITE_ROOT, match.folder);
+  if (!dir.startsWith(path.resolve(SITE_ROOT)) || !fs.existsSync(dir)) return { folder: match.folder, images: [] };
+  const images = fs.readdirSync(dir)
+    .filter((name) => imageExt.has(path.extname(name).toLowerCase()))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return { folder: match.folder, images };
+}
+
+function clampRangeStart(start, count, total) {
+  const safeCount = Math.max(1, Math.min(Number(count) || 1, Math.max(1, total)));
+  return Math.max(0, Math.min(Number(start) || 0, Math.max(0, total - safeCount)));
+}
+
+function resolveDocxSourceCorrectionRange(payload) {
+  const structure = String(payload.structure || "").replace(/[^0-9A-Za-z_-]/g, "");
+  const action = String(payload.action || "shift_next").replace(/[^a-zA-Z0-9_.-]/g, "");
+  const current = uniqueStrings(payload.source_refs || payload.sourceRefs || []);
+  const { folder, images } = siteImageListForStructure(structure);
+  const oldSourceRefs = current.filter((name) => images.includes(name));
+  const fallbackStart = oldSourceRefs.length ? images.indexOf(oldSourceRefs[0]) : 0;
+  const startIndex = Math.max(0, fallbackStart);
+  const oldCount = Math.max(1, oldSourceRefs.length || Number(payload.count || 1) || 1);
+  let nextStart = startIndex;
+  let nextCount = oldCount;
+
+  if (action === "shift_prev") nextStart -= 1;
+  else if (action === "shift_next") nextStart += 1;
+  else if (action === "extend_start") { nextStart -= 1; nextCount += 1; }
+  else if (action === "extend_end") nextCount += 1;
+  else if (action === "trim_start") { nextStart += 1; nextCount = Math.max(1, nextCount - 1); }
+  else if (action === "trim_end") nextCount = Math.max(1, nextCount - 1);
+  else if (action === "reset") return { structure, folder, images, oldSourceRefs, newSourceRefs: [], action };
+  else if (action === "set_explicit") {
+    const explicit = uniqueStrings(payload.new_source_refs || payload.newSourceRefs || []).filter((name) => images.includes(name));
+    return { structure, folder, images, oldSourceRefs, newSourceRefs: explicit, action };
+  }
+
+  const boundedCount = Math.max(1, Math.min(nextCount, Math.max(1, images.length)));
+  const boundedStart = clampRangeStart(nextStart, boundedCount, images.length);
+  const newSourceRefs = images.slice(boundedStart, boundedStart + boundedCount);
+  return { structure, folder, images, oldSourceRefs, newSourceRefs, action };
+}
+
+async function saveDocxSourceCorrection(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const slotKey = String(payload.slot_key || "").slice(0, 500);
+  if (!slotKey) return json(res, 400, { error: "missing slot_key" });
+  const resolved = resolveDocxSourceCorrectionRange(payload);
+  if (resolved.action !== "reset" && !resolved.newSourceRefs.length) {
+    return json(res, 400, { error: "no corrected source range available", resolved });
+  }
+  const item = {
+    at: new Date().toISOString(),
+    correction_id: crypto.createHash("sha1").update(`${Date.now()}:${slotKey}:${Math.random()}`).digest("hex").slice(0, 16),
+    slot_key: slotKey,
+    lock_key: String(payload.lock_key || "").slice(0, 500),
+    action: resolved.action,
+    status: resolved.action === "reset" ? "reset" : "active",
+    structure: resolved.structure,
+    table_key: payload.table_key || null,
+    label: payload.label || null,
+    row_index: payload.row_index ?? null,
+    col_index: payload.col_index ?? null,
+    old_source_refs: resolved.oldSourceRefs,
+    new_source_refs: resolved.newSourceRefs,
+    source_folder: resolved.folder,
+    actual: payload.actual || "",
+    expected: payload.expected || "",
+    cell_status: payload.cell_status || null,
+    note: String(payload.note || "").slice(0, 1200),
+    source: "docx_review_source_range",
+  };
+  /*
+   * This append-only ledger is the source-of-truth boundary for reviewer-side
+   * evidence-range corrections. The browser can offer convenient buttons now
+   * and drag handles later, but every correction must become one ledger event.
+   * `docx_review.py` replays the latest active event for each slot before the
+   * UI renders, which prevents the dangerous split-brain state where the cell
+   * visually appears corrected but validation/agents still see the old image
+   * range.
+   */
+  fs.appendFileSync(DOCX_SOURCE_CORRECTIONS, JSON.stringify(item) + "\n");
+  fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+    at: item.at,
+    kind: "docx_source_range_corrected",
+    structure: item.structure,
+    title: `${item.table_key || "docx"} ${item.label || ""}`.trim(),
+    action: item.action,
+    value: item.new_source_refs.join(", "),
+    slot_key: item.slot_key,
+  }) + "\n");
+  json(res, 200, { ok: true, item });
+}
+
 function latestCompleteRunForStructure(structure) {
   return listRuns().find((run) => String(run.structure) === String(structure) && run.status === "complete") || null;
 }
@@ -1657,6 +1771,8 @@ async function api(req, res, url) {
   if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
   if (url.pathname === "/api/docx-review/feedback") return saveDocxReviewFeedback(req, res);
   if (url.pathname === "/api/docx-review/lock") return saveDocxCellLock(req, res);
+  if (url.pathname === "/api/docx-review/correction") return saveDocxSourceCorrection(req, res);
+  if (url.pathname === "/api/docx-review/corrections") return json(res, 200, { corrections: readJsonLines(DOCX_SOURCE_CORRECTIONS).slice(-200).reverse() });
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
   if (url.pathname === "/api/stats") return json(res, 200, stats());

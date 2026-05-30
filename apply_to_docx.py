@@ -18,16 +18,18 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 CURRENT = RUNS / "current-run.txt"
 SOURCE_OF_TRUTH = ROOT / "report-source-of-truth.json"
+LOCAL_SOURCE_OF_TRUTH = ROOT / "report-source-of-truth.local.json"
 DOCX_CELL_LOCKS = RUNS / "docx-cell-locks.jsonl"
 
 
 def load_report_source_of_truth() -> dict:
-    data = json.loads(SOURCE_OF_TRUTH.read_text())
+    config_path = Path(__import__("os").environ.get("CP_REPORT_CONFIG", "")).expanduser() if __import__("os").environ.get("CP_REPORT_CONFIG") else (LOCAL_SOURCE_OF_TRUTH if LOCAL_SOURCE_OF_TRUTH.exists() else SOURCE_OF_TRUTH)
+    data = json.loads(config_path.read_text())
     original = Path(data["original_docx"]).expanduser().resolve()
     active = Path(data[data.get("active_output_role", "working_final_docx")]).expanduser().resolve()
     if data.get("never_write_original", True) and active == original:
         raise RuntimeError("Report source-of-truth misconfigured: active output equals original DOCX.")
-    return {**data, "original_docx": str(original), "active_docx": str(active)}
+    return {**data, "config_path": str(config_path), "original_docx": str(original), "active_docx": str(active)}
 
 
 REPORT_SOURCE_OF_TRUTH = load_report_source_of_truth()
@@ -378,7 +380,8 @@ def valid_docx(path: Path) -> bool:
 
 def write_docx(run_dir: Path, state: State, patch: dict, shared: bool = True) -> Path:
     structure = state.state["structure"]
-    out = SHARED_OUTPUT if shared else REPORT_DIR / f"CP Installation Report___CETO 962L-986L__subagent-dashboard-STR{structure}.docx"
+    single_name = REPORT_SOURCE_OF_TRUTH.get("single_output_name_template", "report-subagent-dashboard-STR{structure}.docx").format(structure=structure)
+    out = SHARED_OUTPUT if shared else REPORT_DIR / single_name
     if out.resolve() == ORIGINAL.resolve():
         raise RuntimeError("Refusing to write original DOCX. Check report-source-of-truth.json.")
     if shared and out.resolve() != SHARED_OUTPUT.resolve():
