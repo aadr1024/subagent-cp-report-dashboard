@@ -29,6 +29,7 @@ let activityConcurrency = null;
 let activityUpdatedAt = null;
 let latestValidation = null;
 let latestDocxReview = null;
+let latestMappingAudit = null;
 let latestDashboardValidation = null;
 let activeSoftwareValidationCase = "";
 const docxOpenStructures = new Set();
@@ -1079,11 +1080,15 @@ function renderDocxSourceCorrectionPanel(slot) {
   const correction = slot.source_correction || null;
   const original = slot.original_source_refs || [];
   const history = slot.source_corrections || [];
+  const latest = history.at(-1) || correction || null;
   const sourceChips = sources.length
     ? sources.map((source, index) => `<span class="docx-source-chip ${index === 0 ? "primary" : ""}">${escapeHtml(source)}</span>`).join("")
     : `<span class="docx-source-chip missing">no source image</span>`;
   const originalLine = correction && original.length
     ? `<small>original: ${escapeHtml(original.join(" → "))}</small>`
+    : "";
+  const latestLine = latest
+    ? `<small class="docx-source-latest">latest ${escapeHtml(latest.action || "correction")}: ${escapeHtml((latest.new_source_refs || []).join(" → ") || "reset")}${latest.note ? ` · ${escapeHtml(latest.note)}` : ""}</small>`
     : "";
   return `<div class="docx-source-correction ${correction ? "active" : ""}">
     <div class="docx-source-head">
@@ -1092,6 +1097,7 @@ function renderDocxSourceCorrectionPanel(slot) {
     </div>
     <div class="docx-source-strip">${sourceChips}</div>
     ${originalLine}
+    ${latestLine}
     <div class="docx-source-actions">
       <button class="small-btn docx-source-correct" data-correction-action="shift_prev" type="button">← shift</button>
       <button class="small-btn docx-source-correct" data-correction-action="shift_next" type="button">shift →</button>
@@ -1407,6 +1413,66 @@ async function pollDocxReview() {
     if (!res.ok) return;
     renderDocxReview(await res.json());
   } catch {}
+}
+
+function mappingSeverityClass(value) {
+  if (value === "high") return "bad";
+  if (value === "medium") return "blank";
+  if (value === "low") return "docx-only";
+  return "ok";
+}
+
+function renderMappingAudit(payload) {
+  latestMappingAudit = payload;
+  const panel = $("mappingAuditPanel");
+  const status = $("mappingAuditStatus");
+  if (!panel) return;
+  if (!payload || payload.status === "failed") {
+    if (status) status.textContent = "mapping audit failed";
+    panel.innerHTML = `<div class="message">Mapping audit failed: ${escapeHtml(payload?.error || "no payload")}</div>`;
+    return;
+  }
+  const summary = payload.summary || {};
+  const issues = payload.issues || [];
+  if (status) status.textContent = `${Number(summary.issues || 0)} issues · ${Number(summary.matched || 0)} matched · ${escapeHtml(fmtTime(payload.updated_at))}`;
+  panel.innerHTML = `<div class="mapping-audit-summary">
+    <div class="stat-card"><span>Compared</span><strong>${Number(summary.compared_slots || 0)}</strong><small>manual-label slots with evidence</small></div>
+    <div class="stat-card"><span>Matched</span><strong>${Number(summary.matched || 0)}</strong><small>agent source == manual source</small></div>
+    <div class="stat-card"><span>Issues</span><strong>${Number(summary.issues || 0)}</strong><small><mark class="bad">${Number(summary.high || 0)} high</mark> <mark class="hot">${Number(summary.medium || 0)} med</mark> <mark>${Number(summary.low || 0)} low</mark></small></div>
+    <div class="stat-card"><span>Source fixes</span><strong>${Number(summary.source_corrected || 0)}</strong><small>ledger-replayed corrections</small></div>
+  </div>
+  <div class="validation-note">Compares Aadi's manual image-grid labels with the source images currently exposed by DOCX Review. The audit reads the same active DOCX review payload, so reviewer source-range corrections are included after refresh.</div>
+  <div class="mapping-audit-list">${issues.slice(0, 160).map((item) => `<article class="mapping-audit-card ${mappingSeverityClass(item.severity)}">
+    <div>
+      <strong>STR ${escapeHtml(item.structure || "?")} · ${escapeHtml(item.group || item.table || "")} · ${escapeHtml(item.label || "")}</strong>
+      <small>${escapeHtml(item.status || "")} · DOCX ${escapeHtml(item.docx_status || "")} · value ${escapeHtml(item.actual || "blank")}</small>
+    </div>
+    <div class="mapping-image-grid">
+      <span>manual</span><code>${escapeHtml((item.manual_images || []).join(" · ") || "none")}</code>
+      <span>agent</span><code>${escapeHtml((item.agent_images || []).join(" · ") || "none")}</code>
+    </div>
+    <p>${escapeHtml(item.recommendation || "")}</p>
+  </article>`).join("") || `<div class="message">No mapping issues found in the latest audit.</div>`}</div>`;
+}
+
+async function pollMappingAudit(record = false) {
+  const button = $("runMappingAuditBtn");
+  if (record && button) {
+    button.disabled = true;
+    button.textContent = "Running audit";
+  }
+  try {
+    const res = await fetch(`/api/mapping-audit${record ? "?record=1" : ""}`, { cache: "no-store" });
+    const payload = await res.json();
+    renderMappingAudit(payload);
+  } catch (error) {
+    renderMappingAudit({ status: "failed", error: String(error) });
+  } finally {
+    if (record && button) {
+      button.disabled = false;
+      button.textContent = "Run + record audit";
+    }
+  }
 }
 
 function dashboardValidationClass(status) {
@@ -2134,6 +2200,8 @@ async function saveDocxSourceCorrection(button) {
       note: noteInput?.value || "",
     }),
   });
+  let payload = {};
+  try { payload = await res.json(); } catch {}
   button.disabled = false;
   button.textContent = res.ok ? "Saved" : "Save failed";
   /*
@@ -2147,6 +2215,19 @@ async function saveDocxSourceCorrection(button) {
   if (res.ok) {
     if (noteInput) noteInput.value = "";
     cell.classList.add("source-corrected");
+    addFeedbackConsoleItem({
+      status: "captured",
+      title: `STR ${cell.dataset.structure || "?"} source range`,
+      value: (payload.item?.new_source_refs || []).join(" -> ") || "reset",
+      route: "saved -> docx-source-corrections ledger -> docx_review replay",
+    });
+  } else {
+    addFeedbackConsoleItem({
+      status: "failed",
+      title: `STR ${cell.dataset.structure || "?"} source correction failed`,
+      value: payload.error || `HTTP ${res.status}`,
+      route: payload.resolved ? JSON.stringify(payload.resolved).slice(0, 220) : "server rejected source correction",
+    });
   }
   setTimeout(() => { button.textContent = action === "reset" ? "reset" : action.replaceAll("_", " "); }, 1200);
   pollDocxReview();
@@ -2796,6 +2877,8 @@ document.addEventListener("click", (event) => {
   if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
   const docxSourceCorrection = event.target.closest(".docx-source-correct");
   if (docxSourceCorrection) saveDocxSourceCorrection(docxSourceCorrection);
+  const mappingAudit = event.target.closest("#runMappingAuditBtn");
+  if (mappingAudit) pollMappingAudit(true);
   const docxLock = event.target.closest(".docx-lock");
   if (docxLock) saveDocxCellLock(docxLock, "lock", "Locked from DOCX Review");
   const docxUnlock = event.target.closest(".docx-unlock");
@@ -3083,6 +3166,7 @@ loadReportSourceTruth();
 renderFeedbackConsole();
 poll();
 pollActivity();
+pollMappingAudit();
 pollValidation();
 pollFeedbackStatus();
 pollRegressionSolutions();

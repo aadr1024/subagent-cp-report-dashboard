@@ -28,6 +28,7 @@ const DOCX_CELL_LOCKS = path.join(RUNS, "docx-cell-locks.jsonl");
 const DOCX_SOURCE_CORRECTIONS = path.join(RUNS, "docx-source-corrections.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
+const MAPPING_AUDIT_SCRIPT = path.join(ROOT, "mapping_audit.py");
 const PUBLIC_CONFIG = readJsonFile(REPORT_SOURCE_OF_TRUTH, {});
 const LOCAL_CONFIG = readJsonFile(process.env.CP_REPORT_CONFIG || LOCAL_REPORT_SOURCE_OF_TRUTH, PUBLIC_CONFIG);
 const CONFIG = { ...PUBLIC_CONFIG, ...LOCAL_CONFIG };
@@ -76,6 +77,7 @@ fs.mkdirSync(RUNS, { recursive: true });
 fs.mkdirSync(THUMBS, { recursive: true });
 fs.mkdirSync(VALIDATIONS, { recursive: true });
 fs.mkdirSync(REGRESSION_RECHECKS, { recursive: true });
+fs.mkdirSync(path.join(RUNS, "audits"), { recursive: true });
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -219,6 +221,33 @@ function dashboardValidationPayload(url) {
         evidence: [],
         feedback: [],
         updated_at: new Date().toISOString(),
+      }],
+    };
+  }
+  return JSON.parse(result.stdout || "{}");
+}
+
+function mappingAuditPayload(url) {
+  const python = process.env.PYTHON || "python3";
+  const args = [MAPPING_AUDIT_SCRIPT];
+  if (url.searchParams.get("record") === "1") args.push("--record");
+  else args.push("--latest");
+  const result = spawnSync(python, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    maxBuffer: 80 * 1024 * 1024,
+    timeout: 35_000,
+  });
+  if (result.status !== 0) {
+    return {
+      updated_at: new Date().toISOString(),
+      status: "failed",
+      error: result.stderr || result.stdout || `mapping_audit.py exited ${result.status}`,
+      summary: { compared_slots: 0, issues: 1, high: 1, medium: 0, low: 0 },
+      issues: [{
+        severity: "high",
+        status: "mapping_audit_failed",
+        recommendation: "Inspect server logs or run python3 mapping_audit.py --record from the dashboard repo.",
       }],
     };
   }
@@ -1383,6 +1412,17 @@ function activityFeed() {
       message: `promoted ${item.candidate_count || 0} correction(s) across ${item.run_count || 0} run(s); docx writes=${writes.length}; failed=${failed}`,
     });
   }
+  for (const item of readJsonLines(DOCX_SOURCE_CORRECTIONS).slice(-16)) {
+    pushEvent({
+      run_id: "docx-source-corrections",
+      structure: item.structure || "DOCX",
+      status: item.status || "active",
+      seq: 9_790_000,
+      at: item.at,
+      type: "docx-source-correction",
+      message: `${item.action || "correction"} ${item.table_key || "docx"} ${item.label || ""}: ${(item.new_source_refs || []).join(" -> ") || "reset"}`,
+    });
+  }
   const runs = listRuns();
   const runningIds = new Set();
   for (const run of runs) {
@@ -1773,6 +1813,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/docx-review/lock") return saveDocxCellLock(req, res);
   if (url.pathname === "/api/docx-review/correction") return saveDocxSourceCorrection(req, res);
   if (url.pathname === "/api/docx-review/corrections") return json(res, 200, { corrections: readJsonLines(DOCX_SOURCE_CORRECTIONS).slice(-200).reverse() });
+  if (url.pathname === "/api/mapping-audit") return json(res, 200, mappingAuditPayload(url));
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
   if (url.pathname === "/api/stats") return json(res, 200, stats());

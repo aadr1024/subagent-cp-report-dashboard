@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Subagent Dashboard</title>
+    <title>J260101 CP report automation / Subagent Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -125,6 +125,17 @@
           </div>
         </div>
         <div id="docxReviewPanel" class="docx-review-panel-body"></div>
+      </section>
+
+      <section class="panel launcher-panel mapping-audit-panel">
+        <div class="panel-head">
+          <h2>Manual vs Agent Mapping Audit</h2>
+          <div class="board-tools">
+            <span id="mappingAuditStatus">audit not loaded</span>
+            <button id="runMappingAuditBtn" class="small-btn" type="button">Run + record audit</button>
+          </div>
+        </div>
+        <div id="mappingAuditPanel" class="mapping-audit-body"></div>
       </section>
 
       <section class="panel">
