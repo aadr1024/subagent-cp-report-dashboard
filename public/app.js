@@ -27,6 +27,8 @@ let activityEvents = [];
 let activityRuns = [];
 let activityConcurrency = null;
 let activityUpdatedAt = null;
+let pollTelemetryState = null;
+let pollTelemetryFlashUntil = 0;
 let latestValidation = null;
 let latestDocxReview = null;
 let latestMappingAudit = null;
@@ -671,7 +673,7 @@ function rememberAnomalyDraft(input) {
 }
 
 function markScrollablePanelBusy(event) {
-  const target = event.target.closest("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #dashboardValidationPanel .dashboard-validation-list, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
+  const target = event.target?.closest?.("#foldRail .rail-list, #reportLauncher, #statsPanel .health-list, #validationPanel .validation-list, #validationPanel .validation-event-log, #docxReviewPanel .docx-structure-list, #docxReviewPanel .docx-cell-grid, #dashboardValidationPanel .dashboard-validation-list, #feedbackLifecycle .feedback-life-list, #solutionSuite .solution-list, #regressionLedger .regression-list, #events, #artifacts");
   if (!target) return;
   const quietMs = target.closest("#solutionSuite .solution-list, #docxReviewPanel, #dashboardValidationPanel, #validationPanel") ? 6000 : 2600;
   scrollablePanelQuietUntil = Date.now() + quietMs;
@@ -874,6 +876,63 @@ async function pollActivity() {
     activityConcurrency = payload.concurrency || null;
     activityUpdatedAt = payload.updated_at || new Date().toISOString();
     renderActivityTicker();
+  } catch {}
+}
+
+function renderPollMonitor(payload) {
+  pollTelemetryState = payload || {};
+  pollTelemetryFlashUntil = Date.now() + 900;
+  const panel = $("pollMonitor");
+  const counts = pollTelemetryState.counts || {};
+  const endpoints = pollTelemetryState.endpoints || [];
+  const last = pollTelemetryState.last_event || {};
+  const active = Number(pollTelemetryState.active_api_requests || 0);
+  const failures = Number(counts.failures_60s || counts.failed_60s || 0);
+  const lastEndpoint = last.endpoint || last.path || last.pathname || "waiting for backend poll";
+  const lastStatus = last.status || last.status_code || "--";
+  const lastDuration = last.duration_ms !== undefined ? `${Math.round(Number(last.duration_ms) || 0)}ms` : "";
+  const pulledText = `pulled ${Number(counts.last_60s || 0)}/min · active ${active}`;
+
+  document.querySelectorAll(".docx-live-poll-tag").forEach((node) => {
+    node.textContent = pulledText;
+    node.classList.toggle("bad", failures > 0);
+    node.title = failures
+      ? `${failures} failed API poll/write events in the last minute`
+      : "Server-derived API polling/write telemetry from completed backend responses";
+  });
+
+  if (!panel) return;
+  panel.classList.add("pulled");
+  panel.innerHTML = `<div class="poll-monitor-head">
+      <strong>PULLED NOW</strong>
+      <span>${escapeHtml(fmtTime(pollTelemetryState.updated_at || new Date().toISOString()))}</span>
+    </div>
+    <div class="poll-monitor-grid">
+      <mark>${Number(counts.last_10s || 0)} / 10s</mark>
+      <mark>${Number(counts.last_60s || 0)} / min</mark>
+      <mark class="${failures ? "bad" : "ok"}">${failures} fail</mark>
+      <mark>${active} active</mark>
+    </div>
+    <div class="poll-monitor-last">
+      <span>${escapeHtml(lastEndpoint)}</span>
+      <b>${escapeHtml(String(lastStatus))}</b>
+      <em>${escapeHtml(lastDuration)}</em>
+    </div>
+    <div class="poll-monitor-endpoints">${endpoints.slice(0, 5).map((item) => `<div>
+      <span>${escapeHtml(item.endpoint || item.path || "")}</span>
+      <b>${Number(item.count || 0)}</b>
+      <em>${Number(item.avg_ms || 0)}ms avg</em>
+    </div>`).join("")}</div>`;
+  setTimeout(() => {
+    if (Date.now() >= pollTelemetryFlashUntil) panel.classList.remove("pulled");
+  }, 950);
+}
+
+async function pollTelemetry() {
+  try {
+    const res = await fetch("/api/poll-telemetry", { cache: "no-store" });
+    if (!res.ok) return;
+    renderPollMonitor(await res.json());
   } catch {}
 }
 
@@ -1082,6 +1141,7 @@ function renderDocxSourceCorrectionPanel(slot) {
   const original = slot.original_source_refs || [];
   const history = slot.source_corrections || [];
   const latest = history.at(-1) || correction || null;
+  const valueCorrection = slot.value_correction || null;
   const sourceChips = sources.length
     ? sources.map((source, index) => `<span class="docx-source-chip ${index === 0 ? "primary" : ""}">${escapeHtml(source)}</span>`).join("")
     : `<span class="docx-source-chip missing">no source image</span>`;
@@ -1107,7 +1167,9 @@ function renderDocxSourceCorrectionPanel(slot) {
       <button class="small-btn docx-source-correct" data-correction-action="trim_start" type="button">trim first</button>
       <button class="small-btn docx-source-correct" data-correction-action="trim_end" type="button">trim last</button>
       <button class="small-btn docx-source-correct reset" data-correction-action="reset" type="button">reset</button>
+      <button class="small-btn docx-apply-source-correction" type="button" ${correction ? "" : "disabled"}>Apply range to DOCX</button>
     </div>
+    ${valueCorrection ? `<small class="docx-source-latest">DOCX value promoted: ${escapeHtml(valueCorrection.value || "")} from ${escapeHtml((valueCorrection.source_refs || []).join(" → "))}</small>` : ""}
     <small class="docx-source-picker-hint">Hover the cell image, drag or shift-click thumbnails in the floating preview, then save the selected range.</small>
     <input class="docx-source-note" type="text" placeholder="optional note for this source-range correction" />
   </div>`;
@@ -1175,9 +1237,10 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
     slot.writer_expected ? `writer expected ${slot.writer_expected}` : "",
     slot.source_ref ? `source ${slot.source_ref}` : "",
     sourceCorrected ? "reviewer-corrected source range" : "",
+    slot.value_correction ? "reviewer-promoted DOCX value" : "",
     slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
   ].filter(Boolean).join(" · ");
-  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${sourceCorrected ? "source-corrected" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
+  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${sourceCorrected ? "source-corrected" : ""} ${slot.value_correction ? "value-corrected" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
     data-slot-key="${escapeHtml(slotKey)}"
     data-lock-key="${escapeHtml(lockKey)}"
     data-structure="${escapeHtml(structure)}"
@@ -1190,6 +1253,7 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
     data-expected="${escapeHtml(expected)}"
     data-source-refs="${escapeHtml(JSON.stringify(sources))}"
     data-source-correction="${escapeHtml(JSON.stringify(slot.source_correction || null))}"
+    data-value-correction="${escapeHtml(JSON.stringify(slot.value_correction || null))}"
     data-preview-src="${escapeHtml(previewHref)}"
     data-preview-title="${escapeHtml(previewTitle)}"
     data-neighborhood="${escapeHtml(neighborhood)}"
@@ -1331,6 +1395,7 @@ function renderDocxStructure(item, index) {
       <div class="docx-summary-tags">
         <mark class="${docxStatusClass(item.status)}">${escapeHtml((item.status || "unknown").replaceAll("_", " "))}</mark>
         <mark>run ${escapeHtml(item.run_version_label || `${item.run_count || 0}/${item.run_count || 0}`)}</mark>
+        <mark class="docx-live-poll-tag" data-structure="${escapeHtml(structure)}">${pollTelemetryState ? `pulled ${Number(pollTelemetryState.counts?.last_60s || 0)}/min · active ${Number(pollTelemetryState.active_api_requests || 0)}` : "polling --"}</mark>
         <mark>${escapeHtml(docxReviewLine(summary))}</mark>
         ${summary.expected ? `<mark>${Number(summary.expected)} extracted</mark>` : ""}
         ${item.patch_error ? `<mark class="bad">patch issue</mark>` : ""}
@@ -1398,6 +1463,7 @@ function renderDocxReview(payload) {
     <div class="stat-card"><span>Blocking</span><strong>${Number(summary.problem || 0)}</strong><small>missing write / mismatch / patch issue</small></div>
     <div class="stat-card"><span>Locked drift</span><strong>${Number(summary.locked_drift || 0) + Number(summary.locked_write_attempt || 0)}</strong><small>changed or attempted overwrite</small></div>
     <div class="stat-card"><span>Source fixes</span><strong>${Number(summary.source_corrected || 0)}</strong><small>reviewer-corrected evidence ranges</small></div>
+    <div class="stat-card"><span>Value fixes</span><strong>${Number(summary.value_corrected || 0)}</strong><small>source ranges promoted into DOCX</small></div>
   </div>
   ${renderDocxRiskControls(structures)}
   <div class="validation-note">This panel reads the final DOCX file and compares it against the same cell patches used by the DOCX writer. If Word saves a manual change, the next refresh reflects the saved document state.</div>
@@ -2260,6 +2326,65 @@ async function saveDocxSourceCorrection(button) {
   if (result?.ok && noteInput) noteInput.value = "";
 }
 
+async function applyDocxSourceCorrection(button) {
+  const cell = button.closest(".docx-cell");
+  const slotKey = cell?.dataset.slotKey || "";
+  if (!slotKey) return;
+
+  const originalText = button.textContent || "Apply range to DOCX";
+  const note = cell.querySelector(".docx-source-note")?.value?.trim() || "";
+  button.disabled = true;
+  button.classList.add("is-working");
+  button.textContent = "Writing DOCX...";
+  cell.classList.add("value-write-active");
+  cell.classList.remove("write-failed");
+
+  try {
+    const res = await fetch("/api/docx-review/apply-source-correction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot_key: slotKey, note }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || payload.ok === false) {
+      throw new Error(payload.error || payload.message || `HTTP ${res.status}`);
+    }
+
+    const written = Number(payload.result?.written_cells?.length || payload.written_cells?.length || payload.cells?.length || 0);
+    button.textContent = written ? `Applied ${written} cells` : "Applied to DOCX";
+    cell.classList.add("value-corrected");
+    if (typeof addFeedbackConsoleItem === "function") {
+      addFeedbackConsoleItem({
+        status: "captured",
+        title: "DOCX source range promoted",
+        message: `${slotKey}${written ? ` · ${written} DOCX cell${written === 1 ? "" : "s"} written` : ""}`,
+      });
+    }
+
+    const refreshes = [pollDocxReview(), pollActivity(), pollTelemetry()];
+    if (typeof pollMappingAudit === "function") refreshes.push(pollMappingAudit());
+    await Promise.allSettled(refreshes);
+  } catch (error) {
+    const message = error?.message || String(error);
+    button.textContent = "Apply failed";
+    cell.classList.add("write-failed");
+    if (typeof addFeedbackConsoleItem === "function") {
+      addFeedbackConsoleItem({
+        status: "failed",
+        title: "DOCX source-range apply failed",
+        message: `${slotKey}: ${message}`,
+      });
+    }
+  } finally {
+    cell.classList.remove("value-write-active");
+    setTimeout(() => {
+      button.disabled = false;
+      button.classList.remove("is-working");
+      button.textContent = originalText;
+    }, 1400);
+  }
+}
+
 function docxReviewCells() {
   return [...document.querySelectorAll("#docxReviewPanel .docx-cell[data-slot-key]")];
 }
@@ -2902,6 +3027,8 @@ document.addEventListener("click", (event) => {
   if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
   const docxSourceCorrection = event.target.closest(".docx-source-correct");
   if (docxSourceCorrection) saveDocxSourceCorrection(docxSourceCorrection);
+  const docxApplyCorrection = event.target.closest(".docx-apply-source-correction");
+  if (docxApplyCorrection) applyDocxSourceCorrection(docxApplyCorrection);
   const floatingSourceSave = event.target.closest(".save-floating-source-range");
   if (floatingSourceSave) saveFloatingSourceSelection(floatingSourceSave);
   const floatingSourceReset = event.target.closest(".reset-floating-source-selection");
@@ -3338,12 +3465,14 @@ renderFeedbackConsole();
 poll();
 pollActivity();
 pollMappingAudit();
+pollTelemetry();
 pollValidation();
 pollFeedbackStatus();
 pollRegressionSolutions();
 pollRegressionLedger();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
+setInterval(pollTelemetry, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollDocxReview, 3000);
 setInterval(() => pollDashboardValidation(), 2000);

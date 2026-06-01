@@ -29,6 +29,7 @@ const DOCX_SOURCE_CORRECTIONS = path.join(RUNS, "docx-source-corrections.jsonl")
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
 const MAPPING_AUDIT_SCRIPT = path.join(ROOT, "mapping_audit.py");
+const PROMOTE_SOURCE_CORRECTION_SCRIPT = path.join(ROOT, "promote_source_correction.py");
 const PUBLIC_CONFIG = readJsonFile(REPORT_SOURCE_OF_TRUTH, {});
 const LOCAL_CONFIG = readJsonFile(process.env.CP_REPORT_CONFIG || LOCAL_REPORT_SOURCE_OF_TRUTH, PUBLIC_CONFIG);
 const CONFIG = { ...PUBLIC_CONFIG, ...LOCAL_CONFIG };
@@ -91,6 +92,8 @@ const mime = {
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
 const imageExt = new Set([".jpg", ".jpeg", ".png", ".heic"]);
+const POLL_EVENTS = [];
+let activeApiRequests = 0;
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
@@ -99,6 +102,55 @@ function send(res, status, body, type = "application/json; charset=utf-8") {
 
 function json(res, status, payload) {
   send(res, status, JSON.stringify(payload), "application/json; charset=utf-8");
+}
+
+function recordApiPoll(pathname, method, statusCode, durationMs) {
+  const event = {
+    at: new Date().toISOString(),
+    t: Date.now(),
+    endpoint: pathname,
+    method,
+    status: statusCode,
+    ok: statusCode >= 200 && statusCode < 400,
+    duration_ms: Math.round(durationMs),
+  };
+  POLL_EVENTS.push(event);
+  const cutoff = Date.now() - 5 * 60_000;
+  while (POLL_EVENTS.length > 3000 || (POLL_EVENTS[0] && POLL_EVENTS[0].t < cutoff)) POLL_EVENTS.shift();
+}
+
+function pollTelemetry() {
+  const nowMs = Date.now();
+  const windows = {
+    last_10s: POLL_EVENTS.filter((item) => item.t >= nowMs - 10_000),
+    last_60s: POLL_EVENTS.filter((item) => item.t >= nowMs - 60_000),
+    last_5m: POLL_EVENTS.filter((item) => item.t >= nowMs - 5 * 60_000),
+  };
+  const endpoints = {};
+  for (const item of windows.last_60s) {
+    const key = item.endpoint;
+    const bucket = endpoints[key] || { endpoint: key, count: 0, failures: 0, last_at: null, last_status: null, avg_ms: 0, total_ms: 0 };
+    bucket.count += 1;
+    bucket.failures += item.ok ? 0 : 1;
+    bucket.last_at = item.at;
+    bucket.last_status = item.status;
+    bucket.total_ms += item.duration_ms || 0;
+    bucket.avg_ms = Math.round(bucket.total_ms / bucket.count);
+    endpoints[key] = bucket;
+  }
+  return {
+    updated_at: new Date().toISOString(),
+    active_api_requests: activeApiRequests,
+    last_event: POLL_EVENTS.at(-1) || null,
+    counts: {
+      last_10s: windows.last_10s.length,
+      last_60s: windows.last_60s.length,
+      last_5m: windows.last_5m.length,
+      failures_60s: windows.last_60s.filter((item) => !item.ok).length,
+    },
+    endpoints: Object.values(endpoints).sort((a, b) => b.count - a.count).slice(0, 16),
+    recent: POLL_EVENTS.slice(-24).reverse(),
+  };
 }
 
 function runIdFromUrl(url) {
@@ -1681,6 +1733,33 @@ async function saveDocxSourceCorrection(req, res) {
   json(res, 200, { ok: true, item });
 }
 
+async function promoteDocxSourceCorrection(req, res) {
+  const payload = JSON.parse((await readBody(req)) || "{}");
+  const slotKey = String(payload.slot_key || "").slice(0, 500);
+  if (!slotKey) return json(res, 400, { error: "missing slot_key" });
+  const python = process.env.PYTHON || "python3";
+  const args = [PROMOTE_SOURCE_CORRECTION_SCRIPT, "--slot-key", slotKey];
+  const note = String(payload.note || "").trim();
+  if (note) args.push("--note", note.slice(0, 1200));
+  const result = spawnSync(python, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    maxBuffer: 80 * 1024 * 1024,
+    timeout: 120_000,
+  });
+  if (result.status !== 0) {
+    const detail = result.stderr || result.stdout || `promote_source_correction.py exited ${result.status}`;
+    fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify({
+      at: new Date().toISOString(),
+      kind: "docx_source_correction_promotion_failed",
+      slot_key: slotKey,
+      error: detail.slice(-4000),
+    }) + "\n");
+    return json(res, 500, { ok: false, error: detail });
+  }
+  return json(res, 200, JSON.parse(result.stdout || "{}"));
+}
+
 function latestCompleteRunForStructure(structure) {
   return listRuns().find((run) => String(run.structure) === String(structure) && run.status === "complete") || null;
 }
@@ -1812,7 +1891,9 @@ async function api(req, res, url) {
   if (url.pathname === "/api/docx-review/feedback") return saveDocxReviewFeedback(req, res);
   if (url.pathname === "/api/docx-review/lock") return saveDocxCellLock(req, res);
   if (url.pathname === "/api/docx-review/correction") return saveDocxSourceCorrection(req, res);
+  if (url.pathname === "/api/docx-review/apply-source-correction") return promoteDocxSourceCorrection(req, res);
   if (url.pathname === "/api/docx-review/corrections") return json(res, 200, { corrections: readJsonLines(DOCX_SOURCE_CORRECTIONS).slice(-200).reverse() });
+  if (url.pathname === "/api/poll-telemetry") return json(res, 200, pollTelemetry());
   if (url.pathname === "/api/mapping-audit") return json(res, 200, mappingAuditPayload(url));
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
@@ -1900,7 +1981,15 @@ function staticFile(req, res, url) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
-  if (url.pathname.startsWith("/api/")) return api(req, res, url).catch((error) => json(res, 500, { error: String(error.message || error) }));
+  if (url.pathname.startsWith("/api/")) {
+    const started = Date.now();
+    activeApiRequests += 1;
+    res.on("finish", () => {
+      activeApiRequests = Math.max(0, activeApiRequests - 1);
+      recordApiPoll(url.pathname, req.method || "GET", res.statusCode || 0, Date.now() - started);
+    });
+    return api(req, res, url).catch((error) => json(res, 500, { error: String(error.message || error) }));
+  }
   return staticFile(req, res, url);
 });
 

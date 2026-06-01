@@ -20,6 +20,7 @@ SITE_ROOT = Path(os.environ.get("CP_REPORT_SITE_ROOT") or CONFIG.get("site_root"
 DOCX_REVIEW_FEEDBACK = RUNS / "docx-review-feedback.jsonl"
 DOCX_CELL_LOCKS = RUNS / "docx-cell-locks.jsonl"
 DOCX_SOURCE_CORRECTIONS = RUNS / "docx-source-corrections.jsonl"
+DOCX_VALUE_CORRECTIONS = RUNS / "docx-value-corrections.jsonl"
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
 
@@ -303,6 +304,23 @@ def source_corrections_by_slot() -> tuple[dict[str, dict], dict[str, list[dict]]
     return active, history
 
 
+def value_corrections_by_slot() -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    active: dict[str, dict] = {}
+    history: dict[str, list[dict]] = {}
+    for item in read_jsonl(DOCX_VALUE_CORRECTIONS):
+        key = str(item.get("slot_key") or "")
+        if not key:
+            continue
+        history.setdefault(key, []).append(item)
+        action = str(item.get("action") or "").lower()
+        status = str(item.get("status") or "").lower()
+        if action == "reset" or status == "reset":
+            active.pop(key, None)
+        else:
+            active[key] = item
+    return active, history
+
+
 def apply_source_correction(slot: dict, correction: dict | None, history: list[dict]) -> None:
     slot["source_corrections"] = history[-8:]
     if not correction:
@@ -330,6 +348,39 @@ def apply_source_correction(slot: dict, correction: dict | None, history: list[d
         "source_correction_id": correction.get("correction_id"),
         "source_images": refs,
     }
+
+
+def apply_value_correction(slot: dict, correction: dict | None, history: list[dict]) -> None:
+    slot["value_corrections"] = history[-8:]
+    if not correction:
+        return
+    refs = [str(item) for item in correction.get("source_refs") or [] if item]
+    corrected_value = str(correction.get("value") or "")
+    if corrected_value:
+        slot["writer_expected"] = slot.get("expected") or ""
+        slot["expected"] = corrected_value
+    if refs:
+        slot["source_ref"] = refs[0]
+        slot["source_refs"] = refs
+    slot["source_status"] = "operator_promoted_corrected_source_range"
+    slot["value_correction"] = {
+        "promotion_id": correction.get("promotion_id"),
+        "at": correction.get("at"),
+        "value": corrected_value,
+        "visible_value": correction.get("visible_value"),
+        "unit_seen": correction.get("unit_seen"),
+        "source_refs": refs,
+        "note": correction.get("note") or "",
+        "source_method": correction.get("source_method") or "",
+    }
+    notes = slot.get("notes") if isinstance(slot.get("notes"), dict) else {}
+    slot["notes"] = {
+        **notes,
+        "value_correction": "Reviewer promoted corrected evidence range into the active DOCX.",
+        "promotion_id": correction.get("promotion_id"),
+        "source_images": refs or source_refs_from_notes(notes),
+    }
+    slot["status"] = classify_slot("complete", slot.get("expected"), slot.get("actual") or "", None)
 
 
 def cell_lock_key(structure: str, table_index, row_index, col_index) -> str:
@@ -416,17 +467,21 @@ def summarize(slots: list[dict]) -> dict:
         "locked_write_attempt": counts.get("locked_write_attempt", 0),
         "source_corrected": sum(1 for item in slots if item.get("source_correction")),
         "source_correction_events": sum(len(item.get("source_corrections") or []) for item in slots),
+        "value_corrected": sum(1 for item in slots if item.get("value_correction")),
+        "value_correction_events": sum(len(item.get("value_corrections") or []) for item in slots),
         "not_started": counts.get("not_started", 0),
         "problem": problem,
         "counts": counts,
     }
 
 
-def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict], run_count: int = 0, feedback=None, locks=None, source_corrections=None, source_correction_history=None) -> dict:
+def structure_payload(structure: str, source: dict, run_item, tables, specs: list[dict], run_count: int = 0, feedback=None, locks=None, source_corrections=None, source_correction_history=None, value_corrections=None, value_correction_history=None) -> dict:
     feedback = feedback or {}
     locks = locks or {}
     source_corrections = source_corrections or {}
     source_correction_history = source_correction_history or {}
+    value_corrections = value_corrections or {}
+    value_correction_history = value_correction_history or {}
     run_dir, state = run_item if run_item else (None, {})
     target_tables = state.get("target", {}).get("target_tables") or {}
     run_status = state.get("status") or ("not_started" if not run_item else "unknown")
@@ -475,6 +530,7 @@ def structure_payload(structure: str, source: dict, run_item, tables, specs: lis
         slot["feedback_key"] = key_text
         slot["feedback"] = feedback.get(key_text, [])[-8:]
         apply_source_correction(slot, source_corrections.get(key_text), source_correction_history.get(key_text, []))
+        apply_value_correction(slot, value_corrections.get(key_text), value_correction_history.get(key_text, []))
         slots.append(slot)
 
     apply_derived_anode_count_checks(slots)
@@ -518,6 +574,7 @@ def build_payload() -> dict:
     feedback = feedback_by_slot()
     locks = active_cell_locks()
     source_corrections, source_correction_history = source_corrections_by_slot()
+    value_corrections, value_correction_history = value_corrections_by_slot()
     items = [
         structure_payload(
             structure,
@@ -530,6 +587,8 @@ def build_payload() -> dict:
             locks,
             source_corrections,
             source_correction_history,
+            value_corrections,
+            value_correction_history,
         )
         for structure in structures
     ]

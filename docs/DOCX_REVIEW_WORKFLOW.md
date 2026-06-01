@@ -13,6 +13,10 @@ Important invariant: the browser must not invent lasting state. If a correction 
 
 Source-range corrections do not edit DOCX values. They correct the evidence mapping used for review, future validation, and future subagent prompts.
 
+Observability principle:
+
+Use FMEA-driven, Goodhart-resistant observability with invariant and guardrail monitoring. When adding monitoring, first ask what failure modes could fool the reviewer or future agent, then add indicators that make those failures visible instead of optimizing for flattering counts. Prefer backend-derived, ledger-backed, source-of-truth signals over UI-only signals. Monitor invariants and guardrails directly: polling freshness, write/readback agreement, lock drift, source correction replay, value promotion replay, failed correction attempts, stale panes, and silent-empty states.
+
 Manual-vs-agent mapping audit:
 
 - Manual source: configured `annotation_source` from the report source-of-truth manifest.
