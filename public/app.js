@@ -29,6 +29,14 @@ let activityConcurrency = null;
 let activityUpdatedAt = null;
 let pollTelemetryState = null;
 let pollTelemetryFlashUntil = 0;
+let imageLoadTelemetryState = null;
+let imageLoadTelemetryFlushTimer = null;
+const imageLoadTelemetrySession = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const pendingImageLoadTelemetry = [];
+const prewarmedImageUrls = new Set();
+const imagePrewarmQueue = [];
+let imagePrewarmActive = 0;
+let imagePrewarmViewportTimer = null;
 let latestValidation = null;
 let latestDocxReview = null;
 let latestMappingAudit = null;
@@ -213,7 +221,7 @@ function renderReadingChip(reading, images, runId, agent, folderName, readings, 
     <div class="reading-label-row">${editableText(label, runId, agent, reading, "label")}</div>
     ${img ? `<div class="hover-preview" data-neighborhood="${escapeHtml(neighborhood)}" data-group-sources="${escapeHtml(JSON.stringify(groupSources))}">
       <div class="hover-current">
-        <img data-src="${img}" alt="${escapeHtml(reading.source_image || label)}" decoding="async" fetchpriority="low" />
+        <img data-src="${img}" alt="${escapeHtml(reading.source_image || label)}" loading="eager" decoding="async" fetchpriority="high" />
         <div>${escapeHtml(label)}</div>
       </div>
       <div class="neighbor-strip" data-context-groups="${escapeHtml(JSON.stringify(hoverGroups))}">
@@ -936,6 +944,274 @@ async function pollTelemetry() {
   } catch {}
 }
 
+function imageNameFromUrl(value) {
+  try {
+    const url = new URL(value || "", window.location.href);
+    const parts = url.pathname.split("/").filter(Boolean);
+    return decodeURIComponent(parts.at(-1) || "");
+  } catch {
+    return String(value || "").split("/").at(-1) || "";
+  }
+}
+
+function resourceTimingFor(urlValue) {
+  try {
+    const url = new URL(urlValue || "", window.location.href).href;
+    const entries = performance.getEntriesByName(url, "resource");
+    return entries.at(-1) || null;
+  } catch {
+    return null;
+  }
+}
+
+function renderImageLoadMonitor(payload) {
+  imageLoadTelemetryState = payload || {};
+  const panel = $("imageLoadMonitor");
+  if (!panel) return;
+  const oneMinute = imageLoadTelemetryState.last_60s || {};
+  const counts = imageLoadTelemetryState.counts || {};
+  const slowest = imageLoadTelemetryState.slowest || [];
+  const activeItems = imageLoadTelemetryState.active || [];
+  const byRole = oneMinute.by_role || [];
+  const p95 = Number(oneMinute.p95_ms || 0);
+  const health = p95 > 1200 || Number(oneMinute.errors || 0) ? "bad" : p95 > 700 || Number(oneMinute.slow || 0) ? "hot" : "ok";
+  panel.className = `image-load-monitor ${health}`;
+  panel.innerHTML = `<div class="image-load-head">
+      <strong>Image Load Monitor</strong>
+      <span>${escapeHtml(fmtTime(imageLoadTelemetryState.updated_at))}</span>
+    </div>
+    <div class="image-load-grid">
+      <mark class="${health}">p95 ${Number(oneMinute.p95_ms || 0)}ms</mark>
+      <mark>p50 ${Number(oneMinute.p50_ms || 0)}ms</mark>
+      <mark>${Number(imageLoadTelemetryState.active_loads || 0)} active</mark>
+      <mark class="${Number(oneMinute.errors || 0) ? "bad" : "ok"}">${Number(oneMinute.errors || 0)} errors</mark>
+      <mark>${Number(counts.last_10s || 0)} ev / 10s</mark>
+      <mark>${Number(counts.last_60s || 0)} ev / min</mark>
+      <mark>${Number(oneMinute.cached || 0)} cached</mark>
+      <mark class="${Number(oneMinute.slow || 0) ? "hot" : "ok"}">${Number(oneMinute.slow || 0)} slow</mark>
+    </div>
+    <div class="image-load-roles">${byRole.slice(0, 6).map((item) => `<div>
+      <span>${escapeHtml(`${item.role || "unknown"} · ${item.kind || "image"}`)}</span>
+      <b>${Number(item.p95_ms || 0)}ms p95</b>
+      <em>${Number(item.count || 0)} loads · ${Number(item.cached || 0)} cached</em>
+    </div>`).join("") || `<div class="muted">Hover a value/DOCX cell to populate popup image timing.</div>`}</div>
+    <div class="image-load-active">${activeItems.slice(0, 4).map((item) => `<div>
+      <span>${escapeHtml(item.source_image || imageNameFromUrl(item.url) || item.role || "image")}</span>
+      <b>${Number(item.age_ms || 0)}ms active</b>
+      <em>${escapeHtml(item.context || item.role || "")}</em>
+    </div>`).join("")}</div>
+    <div class="image-load-slowest">${slowest.slice(0, 4).map((item) => `<div>
+      <span>${escapeHtml(item.source_image || imageNameFromUrl(item.url) || item.role || "image")}</span>
+      <b>${Number(item.duration_ms || 0)}ms</b>
+      <em>${escapeHtml(item.context || item.kind || "")}</em>
+    </div>`).join("")}</div>`;
+}
+
+async function flushImageLoadTelemetry() {
+  imageLoadTelemetryFlushTimer = null;
+  if (!pendingImageLoadTelemetry.length) return;
+  const events = pendingImageLoadTelemetry.splice(0, 200);
+  try {
+    const res = await fetch("/api/image-load-telemetry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events }),
+    });
+    if (!res.ok) return;
+    const payload = await res.json();
+    renderImageLoadMonitor(payload.telemetry || payload);
+  } catch {}
+}
+
+function queueImageLoadTelemetry(event, flushDelay = 220) {
+  pendingImageLoadTelemetry.push({
+    ...event,
+    session_id: imageLoadTelemetrySession,
+    at: new Date().toISOString(),
+    client_t: Math.round(performance.now()),
+  });
+  if (!imageLoadTelemetryFlushTimer) {
+    imageLoadTelemetryFlushTimer = setTimeout(flushImageLoadTelemetry, flushDelay);
+  }
+}
+
+async function pollImageLoadTelemetry() {
+  try {
+    const res = await fetch("/api/image-load-telemetry", { cache: "no-store" });
+    if (!res.ok) return;
+    renderImageLoadMonitor(await res.json());
+  } catch {}
+}
+
+function previewTelemetryId(preview) {
+  if (!preview?.dataset) return "";
+  if (!preview.dataset.imageTelemetryPreviewId) {
+    preview.dataset.imageTelemetryPreviewId = `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  }
+  return preview.dataset.imageTelemetryPreviewId;
+}
+
+function popupImageContext(preview) {
+  if (preview?.dataset?.sourcePicker === "docx") return "docx-popup";
+  if (preview?.classList?.contains("anomaly-preview")) return "validation-popup";
+  return "run-popup";
+}
+
+function instrumentPopupImage(img, preview, meta = {}, srcOverride = "") {
+  if (!img || img.dataset.imageTelemetryId) return;
+  const src = srcOverride || img.dataset.src || img.currentSrc || img.src || "";
+  if (!src) return;
+  const loadId = `img-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const started = performance.now();
+  const sourceImage = meta.source_image || img.alt || imageNameFromUrl(src);
+  const base = {
+    kind: "image_load",
+    load_id: loadId,
+    preview_id: previewTelemetryId(preview),
+    role: meta.role || "popup-image",
+    context: meta.context || popupImageContext(preview),
+    source_image: sourceImage,
+    url: src,
+  };
+  let finished = false;
+  img.dataset.imageTelemetryId = loadId;
+  queueImageLoadTelemetry({ ...base, status: "start", duration_ms: 0 }, 80);
+  const finish = (status, error = "") => {
+    if (finished) return;
+    finished = true;
+    const timing = resourceTimingFor(img.currentSrc || img.src || src);
+    const duration = Math.max(0, Math.round(performance.now() - started));
+    queueImageLoadTelemetry({
+      ...base,
+      status,
+      duration_ms: duration,
+      transfer_size: Math.round(Number(timing?.transferSize || 0)),
+      decoded_body_size: Math.round(Number(timing?.decodedBodySize || 0)),
+      encoded_body_size: Math.round(Number(timing?.encodedBodySize || 0)),
+      cached: Boolean(timing && timing.transferSize === 0 && (timing.decodedBodySize || timing.encodedBodySize)),
+      error,
+    }, 120);
+  };
+  img.addEventListener("load", () => finish("load"), { once: true });
+  img.addEventListener("error", () => finish("error", "image element error"), { once: true });
+  if (srcOverride) {
+    img.src = srcOverride;
+  }
+  const completeIfReady = () => {
+    if (!finished && img.complete && (img.naturalWidth || img.naturalHeight)) finish("load");
+  };
+  const watchdog = setInterval(completeIfReady, 500);
+  const stopWatchdog = () => clearInterval(watchdog);
+  img.addEventListener("load", stopWatchdog, { once: true });
+  img.addEventListener("error", stopWatchdog, { once: true });
+  queueMicrotask(completeIfReady);
+  setTimeout(completeIfReady, 120);
+  setTimeout(completeIfReady, 700);
+  setTimeout(() => {
+    stopWatchdog();
+    completeIfReady();
+  }, 30_000);
+  setTimeout(() => {
+    if (!finished) queueImageLoadTelemetry({ ...base, status: "still_loading", duration_ms: Math.round(performance.now() - started) }, 120);
+  }, 2000);
+}
+
+function instrumentPopupImages(root, preview, role = "neighbor") {
+  root?.querySelectorAll?.("img").forEach((img) => {
+    const sourceImage = img.closest?.("[data-image-name]")?.dataset.imageName || img.alt || imageNameFromUrl(img.dataset.src || img.src);
+    instrumentPopupImage(img, preview, { role, source_image: sourceImage });
+  });
+}
+
+function queueNeighborhoodFetchTelemetry(preview, status, durationMs, error = "") {
+  queueImageLoadTelemetry({
+    kind: "neighborhood_fetch",
+    status,
+    load_id: `neighborhood-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    preview_id: previewTelemetryId(preview),
+    role: "neighborhood-api",
+    context: popupImageContext(preview),
+    source_image: imageNameFromUrl(preview?.dataset?.neighborhood || ""),
+    url: preview?.dataset?.neighborhood || "",
+    duration_ms: durationMs,
+    error,
+  }, 120);
+}
+
+function drainImagePrewarmQueue() {
+  while (imagePrewarmActive < 2 && imagePrewarmQueue.length) {
+    const item = imagePrewarmQueue.shift();
+    if (!item?.url) continue;
+    imagePrewarmActive += 1;
+    const img = new Image();
+    const started = performance.now();
+    const loadId = `prewarm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const base = {
+      kind: "image_load",
+      load_id: loadId,
+      preview_id: "prewarm",
+      role: item.role || "prewarm-current",
+      context: item.context || "docx-prewarm",
+      source_image: item.source_image || imageNameFromUrl(item.url),
+      url: item.url,
+    };
+    queueImageLoadTelemetry({ ...base, status: "start", duration_ms: 0 }, 120);
+    const done = (status, error = "") => {
+      imagePrewarmActive = Math.max(0, imagePrewarmActive - 1);
+      const timing = resourceTimingFor(img.currentSrc || img.src || item.url);
+      queueImageLoadTelemetry({
+        ...base,
+        status,
+        duration_ms: Math.round(performance.now() - started),
+        transfer_size: Math.round(Number(timing?.transferSize || 0)),
+        decoded_body_size: Math.round(Number(timing?.decodedBodySize || 0)),
+        encoded_body_size: Math.round(Number(timing?.encodedBodySize || 0)),
+        cached: Boolean(timing && timing.transferSize === 0 && (timing.decodedBodySize || timing.encodedBodySize)),
+        error,
+      }, 120);
+      setTimeout(drainImagePrewarmQueue, 20);
+    };
+    img.onload = () => done("load");
+    img.onerror = () => done("error", "prewarm image error");
+    img.decoding = "async";
+    img.fetchPriority = item.priority || "low";
+    img.src = item.url;
+  }
+}
+
+function enqueueImagePrewarm(url, meta = {}) {
+  if (!url) return;
+  const absolute = new URL(url, window.location.href).href;
+  if (prewarmedImageUrls.has(absolute)) return;
+  prewarmedImageUrls.add(absolute);
+  imagePrewarmQueue.push({ ...meta, url: absolute });
+  setTimeout(drainImagePrewarmQueue, 0);
+}
+
+function prewarmVisibleDocxImages(limit = 18) {
+  const cells = [...document.querySelectorAll("#docxReviewPanel .docx-cell.has-preview[data-preview-src]")];
+  const visible = cells.filter((cell) => {
+    const rect = cell.getBoundingClientRect();
+    return rect.bottom >= -400 && rect.top <= window.innerHeight + 700;
+  }).slice(0, limit);
+  for (const cell of visible) {
+    enqueueImagePrewarm(cell.dataset.previewSrc, {
+      role: "prewarm-current",
+      context: "docx-visible-prewarm",
+      source_image: imageNameFromUrl(cell.dataset.previewSrc),
+      priority: "low",
+    });
+  }
+}
+
+function scheduleVisibleImagePrewarm(delay = 250) {
+  if (imagePrewarmViewportTimer) clearTimeout(imagePrewarmViewportTimer);
+  imagePrewarmViewportTimer = setTimeout(() => {
+    imagePrewarmViewportTimer = null;
+    prewarmVisibleDocxImages();
+  }, delay);
+}
+
 function renderValidation(validation) {
   latestValidation = validation;
   const panel = $("validationPanel");
@@ -1473,6 +1749,7 @@ function renderDocxReview(payload) {
   ${renderDocxFilterResults(structures)}
   <div class="docx-structure-list">${structures.map(renderDocxStructure).join("") || `<div class="message">No DOCX targets known yet.</div>`}</div>`;
   restoreScrollPositions(scrollSnapshot);
+  scheduleVisibleImagePrewarm(120);
 }
 
 async function pollDocxReview() {
@@ -3170,11 +3447,14 @@ async function hydrateHoverPreview(preview) {
   if (!preview || preview.dataset.loaded === "1" || !preview.dataset.neighborhood) return;
   preview.dataset.loaded = "1";
   preview.querySelectorAll("img[data-src]").forEach((img) => {
-    img.src = img.dataset.src;
+    const src = img.dataset.src;
     img.removeAttribute("data-src");
+    instrumentPopupImage(img, preview, { role: "current", source_image: imageNameFromUrl(src) || img.alt }, src);
   });
+  const fetchStarted = performance.now();
   try {
     const res = await fetch(preview.dataset.neighborhood, { cache: "no-store" });
+    queueNeighborhoodFetchTelemetry(preview, res.ok ? "fetch" : "error", Math.round(performance.now() - fetchStarted), res.ok ? "" : `HTTP ${res.status}`);
     if (!res.ok) return;
     const payload = await res.json();
     const strip = preview.querySelector(".neighbor-strip");
@@ -3184,8 +3464,13 @@ async function hydrateHoverPreview(preview) {
     try { currentSourceRefs = JSON.parse(preview.dataset.currentSourceRefs || "[]"); } catch {}
     const selectedSources = new Set(currentSourceRefs);
     const selectable = preview.dataset.sourcePicker === "docx";
+    const sourceImages = payload.images || [];
+    const currentIndex = Math.max(0, sourceImages.findIndex((image) => image.current));
+    const priorityNames = new Set(sourceImages
+      .filter((image, index) => image.current || Math.abs(index - currentIndex) <= 5)
+      .map((image) => image.name));
     const figures = (images) => images.map((image) => `<figure class="neighbor ${image.current ? "current" : ""} ${selectable ? "selectable" : ""} ${selectedSources.has(image.name) ? "selected-source" : ""}" data-image-name="${escapeHtml(image.name)}">
-      <img src="${escapeHtml(image.href)}" alt="${escapeHtml(image.name)}" loading="lazy" decoding="async" fetchpriority="low" />
+      <img data-src="${escapeHtml(image.href)}" data-load-priority="${priorityNames.has(image.name) ? "1" : "0"}" alt="${escapeHtml(image.name)}" loading="${priorityNames.has(image.name) ? "eager" : "lazy"}" decoding="async" fetchpriority="${image.current ? "high" : "low"}" />
       <figcaption>${escapeHtml(image.name)}</figcaption>
     </figure>`).join("");
     const groupForImage = (image) => {
@@ -3194,7 +3479,6 @@ async function hydrateHoverPreview(preview) {
     };
     const sameGroup = (a, b) => a && b && a.title === b.title && a.agent === b.agent && Boolean(a.current) === Boolean(b.current);
     const parts = [];
-    const sourceImages = payload.images || [];
     for (let index = 0; index < sourceImages.length; index += 1) {
       const image = sourceImages[index];
       const matchedGroup = groupForImage(image);
@@ -3214,6 +3498,17 @@ async function hydrateHoverPreview(preview) {
       </div>`);
     }
     strip.innerHTML = parts.join("");
+    const startPopupImage = (img) => {
+      const src = img.dataset.src;
+      img.removeAttribute("data-src");
+      const role = img.closest(".neighbor.current") ? "current-neighbor" : "neighbor";
+      const sourceImage = img.closest("[data-image-name]")?.dataset.imageName || img.alt || imageNameFromUrl(src);
+      instrumentPopupImage(img, preview, { role, source_image: sourceImage }, src);
+    };
+    strip.querySelectorAll("img[data-src][data-load-priority='1']").forEach(startPopupImage);
+    setTimeout(() => {
+      strip.querySelectorAll("img[data-src][data-load-priority='0']").forEach(startPopupImage);
+    }, 900);
     if (selectable) initializePreviewSourceSelection(preview);
     requestAnimationFrame(() => {
       const current = strip.querySelector(".neighbor.current");
@@ -3222,7 +3517,9 @@ async function hydrateHoverPreview(preview) {
         strip.scrollLeft = Math.max(0, left);
       }
     });
-  } catch {}
+  } catch (error) {
+    queueNeighborhoodFetchTelemetry(preview, "error", Math.round(performance.now() - fetchStarted), error?.message || String(error));
+  }
 }
 
 function previewSourceFigures(preview) {
@@ -3375,6 +3672,10 @@ function ensureAnomalyFloatingPreview() {
 function showAnomalyFloatingPreview(chip, event) {
   if (!chip?.dataset.previewSrc) return null;
   if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
+  if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor && activeFloatingPreview.classList.contains("is-visible")) {
+    positionFloatingPreview(activeFloatingPreview, chip, event);
+    return activeFloatingPreview;
+  }
   const node = ensureAnomalyFloatingPreview();
   delete node.dataset.loaded;
   node.dataset.neighborhood = chip.dataset.neighborhood || "";
@@ -3400,7 +3701,7 @@ function showAnomalyFloatingPreview(chip, event) {
       <input class="source-picker-note" type="text" placeholder="optional note for this evidence-range correction" />
     </div>` : "";
   node.innerHTML = `<div class="hover-current">
-      <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" decoding="async" fetchpriority="low" />
+      <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" loading="eager" decoding="async" fetchpriority="high" />
       <div>${escapeHtml(chip.dataset.previewTitle || "validation evidence")}</div>
     </div>
     ${sourcePickerControls}
@@ -3466,6 +3767,7 @@ poll();
 pollActivity();
 pollMappingAudit();
 pollTelemetry();
+pollImageLoadTelemetry();
 pollValidation();
 pollFeedbackStatus();
 pollRegressionSolutions();
@@ -3473,6 +3775,7 @@ pollRegressionLedger();
 setInterval(poll, 600);
 setInterval(pollActivity, 2000);
 setInterval(pollTelemetry, 2000);
+setInterval(pollImageLoadTelemetry, 2000);
 setInterval(pollValidation, 2500);
 setInterval(pollDocxReview, 3000);
 setInterval(() => pollDashboardValidation(), 2000);
@@ -3531,6 +3834,7 @@ setInterval(() => {
 ["scroll", "pointerdown", "wheel", "keydown"].forEach((eventName) => {
   window.addEventListener(eventName, () => {
     deferRenderUntil = Date.now() + 1200;
+    if (eventName === "scroll" || eventName === "wheel") scheduleVisibleImagePrewarm(450);
   }, { passive: true });
 });
 document.addEventListener("wheel", markScrollablePanelBusy, { passive: true });

@@ -26,6 +26,7 @@ const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.j
 const DOCX_REVIEW_FEEDBACK = path.join(RUNS, "docx-review-feedback.jsonl");
 const DOCX_CELL_LOCKS = path.join(RUNS, "docx-cell-locks.jsonl");
 const DOCX_SOURCE_CORRECTIONS = path.join(RUNS, "docx-source-corrections.jsonl");
+const IMAGE_LOAD_TELEMETRY = path.join(RUNS, "image-load-telemetry.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
 const MAPPING_AUDIT_SCRIPT = path.join(ROOT, "mapping_audit.py");
@@ -93,7 +94,9 @@ const mime = {
 };
 const imageExt = new Set([".jpg", ".jpeg", ".png", ".heic"]);
 const POLL_EVENTS = [];
+const IMAGE_LOAD_EVENTS = [];
 let activeApiRequests = 0;
+let imageLoadTelemetryLoaded = false;
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
@@ -151,6 +154,154 @@ function pollTelemetry() {
     endpoints: Object.values(endpoints).sort((a, b) => b.count - a.count).slice(0, 16),
     recent: POLL_EVENTS.slice(-24).reverse(),
   };
+}
+
+function percentile(values, pct) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+  return Math.round(sorted[index]);
+}
+
+function ensureImageLoadTelemetryLoaded() {
+  if (imageLoadTelemetryLoaded) return;
+  imageLoadTelemetryLoaded = true;
+  for (const item of readJsonLines(IMAGE_LOAD_TELEMETRY).slice(-3000)) {
+    if (!item || typeof item !== "object") continue;
+    IMAGE_LOAD_EVENTS.push({ ...item, persisted: true });
+  }
+}
+
+function cleanTelemetryString(value, max = 240) {
+  return String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, max);
+}
+
+function sanitizedImageLoadEvent(raw = {}) {
+  const now = Date.now();
+  const event = {
+    at: new Date().toISOString(),
+    t: now,
+    session_id: cleanTelemetryString(raw.session_id, 80),
+    load_id: cleanTelemetryString(raw.load_id, 120),
+    preview_id: cleanTelemetryString(raw.preview_id, 120),
+    kind: cleanTelemetryString(raw.kind || "image_load", 48),
+    status: cleanTelemetryString(raw.status || "event", 48),
+    role: cleanTelemetryString(raw.role || "unknown", 64),
+    context: cleanTelemetryString(raw.context || "popup", 96),
+    source_image: cleanTelemetryString(raw.source_image || "", 160),
+    url: cleanTelemetryString(raw.url || "", 360),
+    duration_ms: Math.max(0, Math.min(120_000, Math.round(Number(raw.duration_ms || 0)))),
+    transfer_size: Math.max(0, Math.min(200_000_000, Math.round(Number(raw.transfer_size || 0)))),
+    decoded_body_size: Math.max(0, Math.min(200_000_000, Math.round(Number(raw.decoded_body_size || 0)))),
+    encoded_body_size: Math.max(0, Math.min(200_000_000, Math.round(Number(raw.encoded_body_size || 0)))),
+    cached: Boolean(raw.cached),
+    error: cleanTelemetryString(raw.error || "", 240),
+  };
+  return event;
+}
+
+function imageLoadSummaryFor(events) {
+  const completed = events.filter((item) => ["load", "error", "complete", "fetch"].includes(item.status) && item.duration_ms >= 0);
+  const successful = completed.filter((item) => item.status !== "error");
+  const durations = successful.map((item) => item.duration_ms).filter((value) => Number.isFinite(value));
+  const byRole = {};
+  for (const item of successful) {
+    const key = `${item.kind}:${item.role}`;
+    const bucket = byRole[key] || {
+      key,
+      kind: item.kind,
+      role: item.role,
+      count: 0,
+      total_ms: 0,
+      avg_ms: 0,
+      p50_ms: 0,
+      p95_ms: 0,
+      max_ms: 0,
+      slow: 0,
+      cached: 0,
+      durations: [],
+    };
+    bucket.count += 1;
+    bucket.total_ms += item.duration_ms || 0;
+    bucket.durations.push(item.duration_ms || 0);
+    bucket.max_ms = Math.max(bucket.max_ms, item.duration_ms || 0);
+    bucket.slow += (item.duration_ms || 0) > 800 ? 1 : 0;
+    bucket.cached += item.cached ? 1 : 0;
+    byRole[key] = bucket;
+  }
+  for (const bucket of Object.values(byRole)) {
+    bucket.avg_ms = Math.round(bucket.total_ms / Math.max(1, bucket.count));
+    bucket.p50_ms = percentile(bucket.durations, 50);
+    bucket.p95_ms = percentile(bucket.durations, 95);
+    delete bucket.durations;
+    delete bucket.total_ms;
+  }
+  return {
+    count: completed.length,
+    success: successful.length,
+    errors: completed.filter((item) => item.status === "error").length,
+    cached: successful.filter((item) => item.cached).length,
+    slow: successful.filter((item) => item.duration_ms > 800).length,
+    avg_ms: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
+    p50_ms: percentile(durations, 50),
+    p95_ms: percentile(durations, 95),
+    max_ms: durations.length ? Math.max(...durations) : 0,
+    by_role: Object.values(byRole).sort((a, b) => b.p95_ms - a.p95_ms).slice(0, 12),
+  };
+}
+
+function imageLoadTelemetry() {
+  ensureImageLoadTelemetryLoaded();
+  const nowMs = Date.now();
+  const recent = IMAGE_LOAD_EVENTS.filter((item) => item.t >= nowMs - 5 * 60_000);
+  const last10s = recent.filter((item) => item.t >= nowMs - 10_000);
+  const last60s = recent.filter((item) => item.t >= nowMs - 60_000);
+  const starts = new Map();
+  for (const item of recent.filter((event) => event.t >= nowMs - 120_000)) {
+    if (item.persisted) continue;
+    if (!item.load_id) continue;
+    if (item.status === "start") starts.set(item.load_id, item);
+    if (["load", "error", "complete", "fetch"].includes(item.status)) starts.delete(item.load_id);
+  }
+  const active = [...starts.values()]
+    .map((item) => ({ ...item, age_ms: Math.max(0, nowMs - Number(item.t || nowMs)) }))
+    .sort((a, b) => b.age_ms - a.age_ms)
+    .slice(0, 12);
+  return {
+    updated_at: new Date().toISOString(),
+    active_loads: starts.size,
+    active,
+    counts: {
+      last_10s: last10s.length,
+      last_60s: last60s.length,
+      last_5m: recent.length,
+    },
+    last_10s: imageLoadSummaryFor(last10s),
+    last_60s: imageLoadSummaryFor(last60s),
+    last_5m: imageLoadSummaryFor(recent),
+    slowest: recent
+      .filter((item) => item.status !== "start")
+      .sort((a, b) => (b.duration_ms || 0) - (a.duration_ms || 0))
+      .slice(0, 10),
+    recent: recent.slice(-32).reverse(),
+  };
+}
+
+async function imageLoadTelemetryRoute(req, res) {
+  ensureImageLoadTelemetryLoaded();
+  if ((req.method || "GET").toUpperCase() === "POST") {
+    const payload = JSON.parse((await readBody(req)) || "{}");
+    const rawEvents = Array.isArray(payload.events) ? payload.events : [payload];
+    const events = rawEvents.slice(0, 200).map(sanitizedImageLoadEvent);
+    for (const event of events) {
+      IMAGE_LOAD_EVENTS.push(event);
+      fs.appendFileSync(IMAGE_LOAD_TELEMETRY, JSON.stringify(event) + "\n");
+    }
+    const cutoff = Date.now() - 5 * 60_000;
+    while (IMAGE_LOAD_EVENTS.length > 5000 || (IMAGE_LOAD_EVENTS[0] && IMAGE_LOAD_EVENTS[0].t < cutoff)) IMAGE_LOAD_EVENTS.shift();
+    return json(res, 200, { ok: true, accepted: events.length, telemetry: imageLoadTelemetry() });
+  }
+  return json(res, 200, imageLoadTelemetry());
 }
 
 function runIdFromUrl(url) {
@@ -335,7 +486,20 @@ function thumbFor(sourceFile, size = 720) {
 function sendThumb(res, file, size) {
   const thumb = thumbFor(file, size);
   if (!thumb) return send(res, 404, "not found", "text/plain");
-  send(res, 200, fs.readFileSync(thumb), "image/jpeg");
+  const body = fs.readFileSync(thumb);
+  /*
+   * Popup review speed depends heavily on repeat thumbnail reads. The generated
+   * thumbnail filename is keyed by source path, source size, source mtime, and
+   * requested size, so a browser cache hit cannot hide a changed source image.
+   */
+  res.writeHead(200, {
+    "Content-Type": "image/jpeg",
+    "Cache-Control": "public, max-age=86400, immutable",
+    "Content-Length": body.length,
+    "X-Thumb-Bytes": String(body.length),
+    "X-Thumb-Source": path.basename(file),
+  });
+  res.end(body);
 }
 
 function maxEventSeq(dir) {
@@ -1618,7 +1782,7 @@ function imageNeighborhood(req, res, url) {
     total: files.length,
     images: selected.map((name) => ({
       name,
-      href: `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(name)}?size=420`,
+      href: `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(name)}?size=260`,
       current: name === image,
     })),
   });
@@ -1894,6 +2058,7 @@ async function api(req, res, url) {
   if (url.pathname === "/api/docx-review/apply-source-correction") return promoteDocxSourceCorrection(req, res);
   if (url.pathname === "/api/docx-review/corrections") return json(res, 200, { corrections: readJsonLines(DOCX_SOURCE_CORRECTIONS).slice(-200).reverse() });
   if (url.pathname === "/api/poll-telemetry") return json(res, 200, pollTelemetry());
+  if (url.pathname === "/api/image-load-telemetry") return imageLoadTelemetryRoute(req, res);
   if (url.pathname === "/api/mapping-audit") return json(res, 200, mappingAuditPayload(url));
   if (url.pathname === "/api/dashboard-validation") return json(res, 200, dashboardValidationPayload(url));
   if (url.pathname === "/api/software-validation/feedback" || url.pathname === "/api/dashboard-validation/feedback") return saveSoftwareValidationFeedback(req, res);
