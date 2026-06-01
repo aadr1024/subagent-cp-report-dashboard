@@ -1597,7 +1597,8 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
   const sources = docxSourceRange(slot);
   const image = sources[0] || "";
   const previewHref = folder && image ? `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(image)}?size=760` : "";
-  const neighborhood = folder && image ? `/api/image-neighborhood?folder=${encodeURIComponent(folder)}&image=${encodeURIComponent(image)}&limit=21` : "";
+  const sourcePickable = Boolean(folder);
+  const neighborhood = folder ? `/api/image-neighborhood?folder=${encodeURIComponent(folder)}&image=${encodeURIComponent(image)}&limit=21` : "";
   const previewTitle = `STR ${structure || "?"} · ${slot.group || slot.table_key || "DOCX"} · ${slot.label || "cell"} · ${actual || "blank"}`;
   const groups = contextGroups.map((group) => ({ ...group, current: (group.sources || []).some((source) => sources.includes(source)) }));
   const slotKey = docxSlotKey(structure, slot);
@@ -1616,7 +1617,7 @@ function renderDocxCell(slot, structureItem, contextGroups = []) {
     slot.value_correction ? "reviewer-promoted DOCX value" : "",
     slot.confidence !== null && slot.confidence !== undefined ? `conf ${Math.round(Number(slot.confidence) * 100)}%` : "",
   ].filter(Boolean).join(" · ");
-  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${sourceCorrected ? "source-corrected" : ""} ${slot.value_correction ? "value-corrected" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
+  return `<div class="docx-cell ${docxStatusClass(status)} ${previewHref ? "has-preview" : ""} ${sourcePickable ? "source-pickable" : ""} ${reviewed ? "reviewed" : ""} ${locked ? "locked" : ""} ${sourceCorrected ? "source-corrected" : ""} ${slot.value_correction ? "value-corrected" : ""} ${activeDocxCellKey === slotKey ? "selected" : ""}" title="${escapeHtml(meta)}"
     data-slot-key="${escapeHtml(slotKey)}"
     data-lock-key="${escapeHtml(lockKey)}"
     data-structure="${escapeHtml(structure)}"
@@ -2802,7 +2803,7 @@ function approveActiveDocxCell() {
 }
 
 function showSelectedDocxPreview(cell) {
-  if (!cell?.classList.contains("has-preview") || !cell.dataset.previewSrc) {
+  if (!cell?.classList.contains("source-pickable") && (!cell?.classList.contains("has-preview") || !cell.dataset.previewSrc)) {
     hideFloatingPreview();
     return;
   }
@@ -3766,7 +3767,7 @@ function ensureAnomalyFloatingPreview() {
 }
 
 function showAnomalyFloatingPreview(chip, event) {
-  if (!chip?.dataset.previewSrc) return null;
+  if (!chip?.dataset.previewSrc && !chip?.dataset.neighborhood) return null;
   if (!chip.dataset.previewAnchor) chip.dataset.previewAnchor = `anomaly-${Math.random().toString(36).slice(2)}`;
   if (activeFloatingPreview?.dataset.anchorId === chip.dataset.previewAnchor && activeFloatingPreview.classList.contains("is-visible")) {
     positionFloatingPreview(activeFloatingPreview, chip, event);
@@ -3796,8 +3797,11 @@ function showAnomalyFloatingPreview(chip, event) {
       <div class="source-picker-selection">Loading current source range</div>
       <input class="source-picker-note" type="text" placeholder="optional note for this evidence-range correction" />
     </div>` : "";
+  const currentPreview = chip.dataset.previewSrc
+    ? `<img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" loading="eager" decoding="async" fetchpriority="high" />`
+    : `<div class="hover-current-placeholder">No current source image yet. Select from the folder images below.</div>`;
   node.innerHTML = `<div class="hover-current">
-      <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" loading="eager" decoding="async" fetchpriority="high" />
+      ${currentPreview}
       <div>${escapeHtml(chip.dataset.previewTitle || "validation evidence")}</div>
     </div>
     ${sourcePickerControls}
@@ -3817,7 +3821,7 @@ function showAnomalyFloatingPreview(chip, event) {
 function handlePreviewHover(event) {
   const chip = event.target.closest(".reading-chip");
   const anomalyChip = event.target.closest(".anomaly-chip");
-  const docxChip = event.target.closest(".docx-cell.has-preview");
+  const docxChip = event.target.closest(".docx-cell.has-preview, .docx-cell.source-pickable");
   if (anomalyChip || docxChip) cancelFloatingPreviewHide();
   const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip, event) : docxChip ? showAnomalyFloatingPreview(docxChip, event) : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
@@ -3835,7 +3839,7 @@ document.addEventListener("mousemove", (event) => {
 document.addEventListener("mouseout", (event) => {
   if (!activeFloatingPreview) return;
   const next = event.relatedTarget;
-  if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".docx-cell.has-preview") || next.closest?.(".floating-preview"))) return;
+  if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".docx-cell.has-preview, .docx-cell.source-pickable") || next.closest?.(".floating-preview"))) return;
   scheduleFloatingPreviewHide();
 });
 document.addEventListener("pointerdown", (event) => {

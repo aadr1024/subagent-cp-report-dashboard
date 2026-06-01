@@ -1875,12 +1875,15 @@ main {
   background: rgba(30, 99, 143, 0.055);
 }
 
-.docx-cell.has-preview {
+.docx-cell.has-preview,
+.docx-cell.source-pickable {
   cursor: zoom-in;
 }
 
 .docx-cell.has-preview:hover,
-.docx-cell.has-preview:focus {
+.docx-cell.has-preview:focus,
+.docx-cell.source-pickable:hover,
+.docx-cell.source-pickable:focus {
   outline: 2px solid rgba(30, 99, 143, 0.22);
   outline-offset: 2px;
 }
@@ -2622,6 +2625,20 @@ main {
 
 .floating-preview.is-visible {
   display: block;
+}
+
+.hover-current-placeholder {
+  min-height: 104px;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  border: 1px dashed rgba(30, 99, 143, 0.36);
+  border-radius: 14px;
+  background: rgba(232, 243, 249, 0.74);
+  color: #1d5f89;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
 }
 
 .anomaly-actions {

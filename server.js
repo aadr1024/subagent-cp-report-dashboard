@@ -1897,17 +1897,18 @@ function imageNeighborhood(req, res, url) {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const found = files.indexOf(image);
   const index = found >= 0 ? found : 0;
+  const anchorImage = files[index] || "";
   const start = Math.max(0, Math.min(files.length, index - Math.floor(limit / 2)));
   const selected = files.slice(start, start + limit);
   const payload = {
     folder,
-    image,
+    image: image || anchorImage,
     index,
     total: files.length,
     images: selected.map((name) => ({
       name,
       href: `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(name)}?size=260`,
-      current: name === image,
+      current: name === (image || anchorImage),
     })),
   };
   /*
