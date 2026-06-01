@@ -37,6 +37,9 @@ const prewarmedImageUrls = new Set();
 const imagePrewarmQueue = [];
 let imagePrewarmActive = 0;
 let imagePrewarmViewportTimer = null;
+const neighborhoodPayloadCache = new Map();
+const neighborhoodFetchPromises = new Map();
+const prewarmedNeighborhoodUrls = new Set();
 let latestValidation = null;
 let latestDocxReview = null;
 let latestMappingAudit = null;
@@ -969,12 +972,16 @@ function renderImageLoadMonitor(payload) {
   const panel = $("imageLoadMonitor");
   if (!panel) return;
   const oneMinute = imageLoadTelemetryState.last_60s || {};
+  const tenSecond = imageLoadTelemetryState.last_10s || {};
   const counts = imageLoadTelemetryState.counts || {};
   const slowest = imageLoadTelemetryState.slowest || [];
+  const historicalSlowest = imageLoadTelemetryState.historical_slowest || [];
   const activeItems = imageLoadTelemetryState.active || [];
   const byRole = oneMinute.by_role || [];
   const p95 = Number(oneMinute.p95_ms || 0);
-  const health = p95 > 1200 || Number(oneMinute.errors || 0) ? "bad" : p95 > 700 || Number(oneMinute.slow || 0) ? "hot" : "ok";
+  const slowActive = activeItems.filter((item) => Number(item.age_ms || 0) > 1200).length;
+  const cacheRate = Number(oneMinute.count || 0) ? Math.round(Number(oneMinute.cached || 0) / Number(oneMinute.count || 1) * 100) : 0;
+  const health = slowActive || p95 > 1200 || Number(oneMinute.errors || 0) ? "bad" : p95 > 700 || Number(oneMinute.slow || 0) ? "hot" : "ok";
   panel.className = `image-load-monitor ${health}`;
   panel.innerHTML = `<div class="image-load-head">
       <strong>Image Load Monitor</strong>
@@ -983,12 +990,16 @@ function renderImageLoadMonitor(payload) {
     <div class="image-load-grid">
       <mark class="${health}">p95 ${Number(oneMinute.p95_ms || 0)}ms</mark>
       <mark>p50 ${Number(oneMinute.p50_ms || 0)}ms</mark>
-      <mark>${Number(imageLoadTelemetryState.active_loads || 0)} active</mark>
+      <mark class="${slowActive ? "bad" : "ok"}">${Number(imageLoadTelemetryState.active_loads || 0)} active</mark>
       <mark class="${Number(oneMinute.errors || 0) ? "bad" : "ok"}">${Number(oneMinute.errors || 0)} errors</mark>
       <mark>${Number(counts.last_10s || 0)} ev / 10s</mark>
       <mark>${Number(counts.last_60s || 0)} ev / min</mark>
       <mark>${Number(oneMinute.cached || 0)} cached</mark>
       <mark class="${Number(oneMinute.slow || 0) ? "hot" : "ok"}">${Number(oneMinute.slow || 0)} slow</mark>
+      <mark class="${cacheRate >= 70 ? "ok" : cacheRate ? "hot" : ""}">${cacheRate}% cache</mark>
+      <mark class="${Number(tenSecond.p95_ms || 0) > 900 ? "hot" : "ok"}">now ${Number(tenSecond.p95_ms || 0)}ms</mark>
+      <mark class="${slowActive ? "bad" : "ok"}">${slowActive} stuck</mark>
+      <mark>${Number(imageLoadTelemetryState.recent?.length || 0)} live rows</mark>
     </div>
     <div class="image-load-roles">${byRole.slice(0, 6).map((item) => `<div>
       <span>${escapeHtml(`${item.role || "unknown"} · ${item.kind || "image"}`)}</span>
@@ -1004,7 +1015,12 @@ function renderImageLoadMonitor(payload) {
       <span>${escapeHtml(item.source_image || imageNameFromUrl(item.url) || item.role || "image")}</span>
       <b>${Number(item.duration_ms || 0)}ms</b>
       <em>${escapeHtml(item.context || item.kind || "")}</em>
-    </div>`).join("")}</div>`;
+    </div>`).join("")}</div>
+    ${historicalSlowest.length ? `<details class="image-load-history"><summary>historical slow loads</summary>${historicalSlowest.slice(0, 4).map((item) => `<div>
+      <span>${escapeHtml(item.source_image || imageNameFromUrl(item.url) || item.role || "image")}</span>
+      <b>${Number(item.duration_ms || 0)}ms</b>
+      <em>${escapeHtml(item.context || item.kind || "")}</em>
+    </div>`).join("")}</details>` : ""}`;
 }
 
 async function flushImageLoadTelemetry() {
@@ -1123,23 +1139,99 @@ function instrumentPopupImages(root, preview, role = "neighbor") {
   });
 }
 
-function queueNeighborhoodFetchTelemetry(preview, status, durationMs, error = "") {
+function queueNeighborhoodFetchTelemetry(preview, status, durationMs, error = "", urlOverride = "", meta = {}) {
+  const url = urlOverride || preview?.dataset?.neighborhood || "";
   queueImageLoadTelemetry({
     kind: "neighborhood_fetch",
     status,
     load_id: `neighborhood-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    preview_id: previewTelemetryId(preview),
+    preview_id: preview ? previewTelemetryId(preview) : (meta.preview_id || "neighborhood-prewarm"),
     role: "neighborhood-api",
-    context: popupImageContext(preview),
-    source_image: imageNameFromUrl(preview?.dataset?.neighborhood || ""),
-    url: preview?.dataset?.neighborhood || "",
+    context: meta.context || popupImageContext(preview),
+    source_image: imageNameFromUrl(url),
+    url,
     duration_ms: durationMs,
     error,
   }, 120);
 }
 
+async function fetchImageNeighborhood(neighborhoodUrl, preview = null, meta = {}) {
+  if (!neighborhoodUrl) return null;
+  const absolute = new URL(neighborhoodUrl, window.location.href).href;
+  if (neighborhoodPayloadCache.has(absolute)) return neighborhoodPayloadCache.get(absolute);
+  if (neighborhoodFetchPromises.has(absolute)) return neighborhoodFetchPromises.get(absolute);
+  const started = performance.now();
+  const promise = fetch(absolute, { cache: "force-cache" })
+    .then(async (res) => {
+      queueNeighborhoodFetchTelemetry(preview, res.ok ? "fetch" : "error", Math.round(performance.now() - started), res.ok ? "" : `HTTP ${res.status}`, absolute, meta);
+      if (!res.ok) return null;
+      const payload = await res.json();
+      neighborhoodPayloadCache.set(absolute, payload);
+      return payload;
+    })
+    .catch((error) => {
+      queueNeighborhoodFetchTelemetry(preview, "error", Math.round(performance.now() - started), error?.message || String(error), absolute, meta);
+      return null;
+    })
+    .finally(() => {
+      neighborhoodFetchPromises.delete(absolute);
+    });
+  neighborhoodFetchPromises.set(absolute, promise);
+  return promise;
+}
+
+function centeredNeighborhoodImages(images, radius = 5) {
+  const sourceImages = images || [];
+  if (!sourceImages.length) return [];
+  const currentIndex = Math.max(0, sourceImages.findIndex((image) => image.current));
+  const start = Math.max(0, currentIndex - radius);
+  const end = Math.min(sourceImages.length, currentIndex + radius + 1);
+  return sourceImages.slice(start, end);
+}
+
+function prewarmNeighborhoodUrl(neighborhoodUrl, meta = {}, radius = 5) {
+  if (!neighborhoodUrl) return;
+  const absolute = new URL(neighborhoodUrl, window.location.href).href;
+  const cacheKey = `${absolute}:${radius}:${meta.context || ""}`;
+  if (prewarmedNeighborhoodUrls.has(cacheKey)) return;
+  prewarmedNeighborhoodUrls.add(cacheKey);
+  fetchImageNeighborhood(absolute, null, {
+    context: meta.context || "neighborhood-prewarm",
+    preview_id: meta.preview_id || "neighborhood-prewarm",
+  }).then((payload) => {
+    const images = centeredNeighborhoodImages(payload?.images || [], radius);
+    for (const image of images) {
+      enqueueImagePrewarm(image.href, {
+        role: image.current ? "prewarm-current-neighbor" : "prewarm-neighbor",
+        context: meta.context || "neighborhood-prewarm",
+        source_image: image.name,
+        priority: meta.priority || "low",
+      });
+    }
+  });
+}
+
+function prewarmPreviewImages(preview, priority = "high") {
+  if (!preview) return;
+  const current = preview.querySelector(".hover-current img");
+  const currentSrc = current?.dataset?.src || current?.currentSrc || current?.src || "";
+  if (currentSrc) {
+    enqueueImagePrewarm(currentSrc, {
+      role: "prewarm-hover-current",
+      context: popupImageContext(preview),
+      source_image: imageNameFromUrl(currentSrc) || current?.alt || "",
+      priority,
+    });
+  }
+  prewarmNeighborhoodUrl(preview.dataset.neighborhood || "", {
+    context: popupImageContext(preview),
+    preview_id: previewTelemetryId(preview),
+    priority,
+  }, 5);
+}
+
 function drainImagePrewarmQueue() {
-  while (imagePrewarmActive < 2 && imagePrewarmQueue.length) {
+  while (imagePrewarmActive < 4 && imagePrewarmQueue.length) {
     const item = imagePrewarmQueue.shift();
     if (!item?.url) continue;
     imagePrewarmActive += 1;
@@ -1184,7 +1276,9 @@ function enqueueImagePrewarm(url, meta = {}) {
   const absolute = new URL(url, window.location.href).href;
   if (prewarmedImageUrls.has(absolute)) return;
   prewarmedImageUrls.add(absolute);
-  imagePrewarmQueue.push({ ...meta, url: absolute });
+  const item = { ...meta, url: absolute };
+  if (meta.priority === "high") imagePrewarmQueue.unshift(item);
+  else imagePrewarmQueue.push(item);
   setTimeout(drainImagePrewarmQueue, 0);
 }
 
@@ -1201,6 +1295,12 @@ function prewarmVisibleDocxImages(limit = 18) {
       source_image: imageNameFromUrl(cell.dataset.previewSrc),
       priority: "low",
     });
+  }
+  for (const cell of visible.slice(0, 8)) {
+    prewarmNeighborhoodUrl(cell.dataset.neighborhood, {
+      context: "docx-visible-neighborhood-prewarm",
+      priority: "low",
+    }, 5);
   }
 }
 
@@ -3446,17 +3546,15 @@ document.addEventListener("click", (event) => {
 async function hydrateHoverPreview(preview) {
   if (!preview || preview.dataset.loaded === "1" || !preview.dataset.neighborhood) return;
   preview.dataset.loaded = "1";
+  prewarmPreviewImages(preview, "high");
   preview.querySelectorAll("img[data-src]").forEach((img) => {
     const src = img.dataset.src;
     img.removeAttribute("data-src");
     instrumentPopupImage(img, preview, { role: "current", source_image: imageNameFromUrl(src) || img.alt }, src);
   });
-  const fetchStarted = performance.now();
   try {
-    const res = await fetch(preview.dataset.neighborhood, { cache: "no-store" });
-    queueNeighborhoodFetchTelemetry(preview, res.ok ? "fetch" : "error", Math.round(performance.now() - fetchStarted), res.ok ? "" : `HTTP ${res.status}`);
-    if (!res.ok) return;
-    const payload = await res.json();
+    const payload = await fetchImageNeighborhood(preview.dataset.neighborhood, preview, { context: popupImageContext(preview) });
+    if (!payload) return;
     const strip = preview.querySelector(".neighbor-strip");
     let contextGroups = [];
     try { contextGroups = JSON.parse(strip.dataset.contextGroups || "[]"); } catch {}
@@ -3517,9 +3615,7 @@ async function hydrateHoverPreview(preview) {
         strip.scrollLeft = Math.max(0, left);
       }
     });
-  } catch (error) {
-    queueNeighborhoodFetchTelemetry(preview, "error", Math.round(performance.now() - fetchStarted), error?.message || String(error));
-  }
+  } catch {}
 }
 
 function previewSourceFigures(preview) {
@@ -3713,6 +3809,7 @@ function showAnomalyFloatingPreview(chip, event) {
   node.style.display = "block";
   node.classList.add("is-visible");
   positionFloatingPreview(node, chip, event);
+  prewarmPreviewImages(node, "high");
   hydrateHoverPreview(node);
   return node;
 }
@@ -3725,6 +3822,7 @@ function handlePreviewHover(event) {
   const preview = chip ? chip.querySelector(".hover-preview") : anomalyChip ? showAnomalyFloatingPreview(anomalyChip, event) : docxChip ? showAnomalyFloatingPreview(docxChip, event) : event.target.closest(".hover-preview");
   const leaf = event.target.closest(".leaf-card");
   if (leaf || chip || preview || anomalyChip || docxChip) deferRenderUntil = Date.now() + 1800;
+  prewarmPreviewImages(preview, "high");
   hydrateHoverPreview(preview);
 }
 

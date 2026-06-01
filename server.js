@@ -26,6 +26,7 @@ const FEEDBACK_CORRECTION_STATUS = path.join(RUNS, "feedback-correction-status.j
 const DOCX_REVIEW_FEEDBACK = path.join(RUNS, "docx-review-feedback.jsonl");
 const DOCX_CELL_LOCKS = path.join(RUNS, "docx-cell-locks.jsonl");
 const DOCX_SOURCE_CORRECTIONS = path.join(RUNS, "docx-source-corrections.jsonl");
+const DOCX_SOURCE_OF_TRUTH = path.join(RUNS, "docx-source-of-truth.json");
 const IMAGE_LOAD_TELEMETRY = path.join(RUNS, "image-load-telemetry.jsonl");
 const DOCX_REVIEW_SCRIPT = path.join(ROOT, "docx_review.py");
 const DASHBOARD_VALIDATION_SCRIPT = path.join(ROOT, "dashboard_validation.py");
@@ -97,6 +98,9 @@ const POLL_EVENTS = [];
 const IMAGE_LOAD_EVENTS = [];
 let activeApiRequests = 0;
 let imageLoadTelemetryLoaded = false;
+const THUMB_BODY_CACHE = new Map();
+let thumbBodyCacheBytes = 0;
+const THUMB_BODY_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
@@ -253,7 +257,8 @@ function imageLoadSummaryFor(events) {
 function imageLoadTelemetry() {
   ensureImageLoadTelemetryLoaded();
   const nowMs = Date.now();
-  const recent = IMAGE_LOAD_EVENTS.filter((item) => item.t >= nowMs - 5 * 60_000);
+  const allRecent = IMAGE_LOAD_EVENTS.filter((item) => item.t >= nowMs - 5 * 60_000);
+  const recent = allRecent.filter((item) => !item.persisted);
   const last10s = recent.filter((item) => item.t >= nowMs - 10_000);
   const last60s = recent.filter((item) => item.t >= nowMs - 60_000);
   const starts = new Map();
@@ -283,8 +288,109 @@ function imageLoadTelemetry() {
       .filter((item) => item.status !== "start")
       .sort((a, b) => (b.duration_ms || 0) - (a.duration_ms || 0))
       .slice(0, 10),
+    historical_slowest: allRecent
+      .filter((item) => item.persisted && item.status !== "start")
+      .sort((a, b) => (b.duration_ms || 0) - (a.duration_ms || 0))
+      .slice(0, 6),
     recent: recent.slice(-32).reverse(),
   };
+}
+
+function activeDocxSourceCorrections() {
+  const active = {};
+  for (const item of readJsonLines(DOCX_SOURCE_CORRECTIONS)) {
+    const key = String(item.slot_key || "");
+    if (!key) continue;
+    if (item.action === "reset" || item.status === "reset") delete active[key];
+    else active[key] = item;
+  }
+  return active;
+}
+
+function docxSourceOfTruthSnapshot(reason = "read") {
+  const review = docxReviewPayload();
+  const sourceTruth = reportSourceOfTruth();
+  const activeRanges = activeDocxSourceCorrections();
+  const ranges = Object.values(activeRanges).map((item) => ({
+    correction_id: item.correction_id || "",
+    at: item.at || "",
+    slot_key: item.slot_key || "",
+    lock_key: item.lock_key || "",
+    structure: String(item.structure || ""),
+    table_key: item.table_key || "",
+    label: item.label || "",
+    row_index: item.row_index,
+    col_index: item.col_index,
+    source_folder: item.source_folder || "",
+    selected_source_refs: item.new_source_refs || [],
+    previous_source_refs: item.old_source_refs || [],
+    note: item.note || "",
+    status: item.status || "active",
+  }));
+  const cells = [];
+  for (const structure of review.structures || []) {
+    for (const slot of structure.slots || []) {
+      const slotKey = slot.slot_key || [
+        structure.structure,
+        slot.table_key,
+        slot.label,
+        slot.row_index,
+        slot.col_index,
+      ].join("|");
+      const range = activeRanges[slotKey] || null;
+      cells.push({
+        slot_key: slotKey,
+        structure: String(structure.structure || ""),
+        table_key: slot.table_key || "",
+        group: slot.group || "",
+        label: slot.label || "",
+        row_index: slot.row_index,
+        col_index: slot.col_index,
+        status: slot.status || "",
+        actual: slot.actual || "",
+        expected: slot.expected || "",
+        source_refs: slot.source_refs || [],
+        value_source_refs: slot.value_correction?.source_refs || [],
+        corrected_range_refs: range?.new_source_refs || slot.source_correction?.new_source_refs || null,
+        source_correction_id: range?.correction_id || slot.source_correction?.correction_id || "",
+        value_promotion_id: slot.value_correction?.promotion_id || "",
+      });
+    }
+  }
+  return {
+    updated_at: new Date().toISOString(),
+    reason,
+    invariant: "DOCX source-of-truth snapshot is derived from active DOCX Review readback plus append-only source/value correction ledgers. It is a materialized snapshot for humans and future agents; ledgers remain the audit trail.",
+    active_docx_path: sourceTruth.active_docx || "",
+    active_docx_exists: review.active_docx_exists,
+    active_docx_mtime: review.active_docx_mtime || "",
+    summary: review.summary || {},
+    active_source_range_count: ranges.length,
+    active_source_ranges: ranges.sort((a, b) => String(a.structure).localeCompare(String(b.structure), undefined, { numeric: true }) || String(a.slot_key).localeCompare(String(b.slot_key))),
+    cells,
+  };
+}
+
+function writeDocxSourceOfTruthSnapshot(reason = "updated") {
+  try {
+    const snapshot = docxSourceOfTruthSnapshot(reason);
+    fs.writeFileSync(DOCX_SOURCE_OF_TRUTH, JSON.stringify(snapshot, null, 2) + "\n");
+    return { ok: true, snapshot };
+  } catch (error) {
+    const item = {
+      at: new Date().toISOString(),
+      type: "docx_source_of_truth_snapshot_failed",
+      reason,
+      error: String(error.message || error),
+    };
+    fs.appendFileSync(FEEDBACK_PROCESSING, JSON.stringify(item) + "\n");
+    return { ok: false, error: item.error };
+  }
+}
+
+function readDocxSourceOfTruth() {
+  if (fs.existsSync(DOCX_SOURCE_OF_TRUTH)) return readJsonFile(DOCX_SOURCE_OF_TRUTH, {});
+  return writeDocxSourceOfTruthSnapshot("initial_read").snapshot || {};
 }
 
 async function imageLoadTelemetryRoute(req, res) {
@@ -486,11 +592,28 @@ function thumbFor(sourceFile, size = 720) {
 function sendThumb(res, file, size) {
   const thumb = thumbFor(file, size);
   if (!thumb) return send(res, 404, "not found", "text/plain");
-  const body = fs.readFileSync(thumb);
+  const stat = fs.statSync(thumb);
+  const cacheKey = `${thumb}:${stat.size}:${stat.mtimeMs}`;
+  let body = THUMB_BODY_CACHE.get(cacheKey);
+  let memoryHit = true;
+  if (!body) {
+    memoryHit = false;
+    body = fs.readFileSync(thumb);
+    THUMB_BODY_CACHE.set(cacheKey, body);
+    thumbBodyCacheBytes += body.length;
+    while (thumbBodyCacheBytes > THUMB_BODY_CACHE_MAX_BYTES && THUMB_BODY_CACHE.size) {
+      const [oldestKey, oldestBody] = THUMB_BODY_CACHE.entries().next().value;
+      THUMB_BODY_CACHE.delete(oldestKey);
+      thumbBodyCacheBytes -= oldestBody.length;
+    }
+  }
   /*
    * Popup review speed depends heavily on repeat thumbnail reads. The generated
    * thumbnail filename is keyed by source path, source size, source mtime, and
    * requested size, so a browser cache hit cannot hide a changed source image.
+   * A small server-side body cache removes local disk reads from repeated hover
+   * review. The key includes thumb mtime/size, so regenerated thumbnails cannot
+   * silently serve stale bytes.
    */
   res.writeHead(200, {
     "Content-Type": "image/jpeg",
@@ -498,6 +621,7 @@ function sendThumb(res, file, size) {
     "Content-Length": body.length,
     "X-Thumb-Bytes": String(body.length),
     "X-Thumb-Source": path.basename(file),
+    "X-Thumb-Memory-Cache": memoryHit ? "hit" : "miss",
   });
   res.end(body);
 }
@@ -1775,7 +1899,7 @@ function imageNeighborhood(req, res, url) {
   const index = found >= 0 ? found : 0;
   const start = Math.max(0, Math.min(files.length, index - Math.floor(limit / 2)));
   const selected = files.slice(start, start + limit);
-  return json(res, 200, {
+  const payload = {
     folder,
     image,
     index,
@@ -1785,7 +1909,19 @@ function imageNeighborhood(req, res, url) {
       href: `/api/thumb/site/${encodeURIComponent(folder)}/${encodeURIComponent(name)}?size=260`,
       current: name === image,
     })),
+  };
+  /*
+   * Neighborhood JSON is only folder image order plus immutable thumbnail URLs.
+   * Caching it makes hover strips appear immediately after the first read while
+   * the correction ledger remains authoritative for which images are selected.
+   */
+  const body = JSON.stringify(payload);
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+    "Content-Length": Buffer.byteLength(body),
   });
+  return res.end(body);
 }
 
 function uniqueStrings(values) {
@@ -1894,7 +2030,17 @@ async function saveDocxSourceCorrection(req, res) {
     value: item.new_source_refs.join(", "),
     slot_key: item.slot_key,
   }) + "\n");
-  json(res, 200, { ok: true, item });
+  const sourceTruth = writeDocxSourceOfTruthSnapshot("source_range_saved");
+  json(res, 200, {
+    ok: true,
+    item,
+    source_truth: {
+      ok: sourceTruth.ok,
+      path: DOCX_SOURCE_OF_TRUTH,
+      error: sourceTruth.error || null,
+      active_source_range_count: sourceTruth.snapshot?.active_source_range_count,
+    },
+  });
 }
 
 async function promoteDocxSourceCorrection(req, res) {
@@ -1921,7 +2067,17 @@ async function promoteDocxSourceCorrection(req, res) {
     }) + "\n");
     return json(res, 500, { ok: false, error: detail });
   }
-  return json(res, 200, JSON.parse(result.stdout || "{}"));
+  const payloadOut = JSON.parse(result.stdout || "{}");
+  const sourceTruth = writeDocxSourceOfTruthSnapshot("source_range_promoted_to_docx");
+  return json(res, 200, {
+    ...payloadOut,
+    source_truth: {
+      ok: sourceTruth.ok,
+      path: DOCX_SOURCE_OF_TRUTH,
+      error: sourceTruth.error || null,
+      active_source_range_count: sourceTruth.snapshot?.active_source_range_count,
+    },
+  });
 }
 
 function latestCompleteRunForStructure(structure) {
@@ -2050,6 +2206,7 @@ async function feedback(req, res) {
 async function api(req, res, url) {
   if (url.pathname === "/api/runs") return json(res, 200, { runs: listRuns() });
   if (url.pathname === "/api/report/source-of-truth") return json(res, 200, reportSourceOfTruth());
+  if (url.pathname === "/api/docx-source-of-truth") return json(res, 200, readDocxSourceOfTruth());
   if (url.pathname === "/api/report/open-final") return openFinalReport(res);
   if (url.pathname === "/api/docx-review") return json(res, 200, docxReviewPayload());
   if (url.pathname === "/api/docx-review/feedback") return saveDocxReviewFeedback(req, res);
