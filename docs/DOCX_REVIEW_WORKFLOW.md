@@ -21,3 +21,11 @@ Manual-vs-agent mapping audit:
 - Actionable statuses: `one_image_off`, `mismatch`, `agent_missing_source`, `manual_missing_label`, and `partial_overlap`.
 
 Reviewer controls should keep common one-image-off fixes cheap: shift left/right, extend before/after, trim first/last, and reset.
+
+Floating preview source picker:
+
+- Hover a DOCX Review cell that has evidence.
+- The floating image preview shows a `Correct evidence range` toolbar.
+- Drag across thumbnails, or shift-click from one image to another, to choose a contiguous evidence range.
+- `Save selected range` writes `action: set_explicit` to `docx-source-corrections.jsonl`.
+- Refresh state must come from `docx_review.py` replaying that ledger; browser-only selection is never authoritative.

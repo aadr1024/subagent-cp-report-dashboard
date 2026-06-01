@@ -48,6 +48,7 @@ let latestSolutionReplay = null;
 let optimisticCaseReplay = null;
 let reportSourceTruth = null;
 let anomalyFloatingPreview = null;
+let previewSourceDrag = null;
 const anomalyNoteDrafts = new Map();
 let validationEditLockUntil = 0;
 
@@ -1107,6 +1108,7 @@ function renderDocxSourceCorrectionPanel(slot) {
       <button class="small-btn docx-source-correct" data-correction-action="trim_end" type="button">trim last</button>
       <button class="small-btn docx-source-correct reset" data-correction-action="reset" type="button">reset</button>
     </div>
+    <small class="docx-source-picker-hint">Hover the cell image, drag or shift-click thumbnails in the floating preview, then save the selected range.</small>
     <input class="docx-source-note" type="text" placeholder="optional note for this source-range correction" />
   </div>`;
 }
@@ -2172,38 +2174,48 @@ async function saveDocxCellLock(button, action = "lock", note = "") {
   pollActivity();
 }
 
-async function saveDocxSourceCorrection(button) {
-  const cell = button.closest(".docx-cell");
-  if (!cell?.dataset.slotKey) return;
-  const action = button.dataset.correctionAction || "shift_next";
+function docxCorrectionPayload(cell, action, note = "", newSourceRefs = null) {
   let sourceRefs = [];
   try { sourceRefs = JSON.parse(cell.dataset.sourceRefs || "[]"); } catch {}
-  const noteInput = cell.querySelector(".docx-source-note");
-  button.disabled = true;
-  button.textContent = action === "reset" ? "Resetting" : "Saving";
+  const payload = {
+    action,
+    slot_key: cell.dataset.slotKey,
+    lock_key: cell.dataset.lockKey,
+    structure: cell.dataset.structure,
+    table_key: cell.dataset.tableKey,
+    label: cell.dataset.label,
+    row_index: cell.dataset.rowIndex,
+    col_index: cell.dataset.colIndex,
+    cell_status: cell.dataset.cellStatus,
+    actual: cell.dataset.actual,
+    expected: cell.dataset.expected,
+    source_refs: sourceRefs,
+    note,
+  };
+  if (newSourceRefs) payload.new_source_refs = newSourceRefs;
+  return payload;
+}
+
+async function postDocxSourceCorrection(cell, action, options = {}) {
+  if (!cell?.dataset.slotKey) return null;
+  const button = options.button || null;
+  const note = options.note ?? "";
+  const newSourceRefs = options.newSourceRefs || null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = action === "reset" ? "Resetting" : "Saving";
+  }
   const res = await fetch("/api/docx-review/correction", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action,
-      slot_key: cell.dataset.slotKey,
-      lock_key: cell.dataset.lockKey,
-      structure: cell.dataset.structure,
-      table_key: cell.dataset.tableKey,
-      label: cell.dataset.label,
-      row_index: cell.dataset.rowIndex,
-      col_index: cell.dataset.colIndex,
-      cell_status: cell.dataset.cellStatus,
-      actual: cell.dataset.actual,
-      expected: cell.dataset.expected,
-      source_refs: sourceRefs,
-      note: noteInput?.value || "",
-    }),
+    body: JSON.stringify(docxCorrectionPayload(cell, action, note, newSourceRefs)),
   });
   let payload = {};
   try { payload = await res.json(); } catch {}
-  button.disabled = false;
-  button.textContent = res.ok ? "Saved" : "Save failed";
+  if (button) {
+    button.disabled = false;
+    button.textContent = res.ok ? "Saved" : "Save failed";
+  }
   /*
    * Do not make a browser-only optimistic source-range mutation here. The save
    * path must round-trip through `/api/docx-review/correction`, then
@@ -2213,7 +2225,6 @@ async function saveDocxSourceCorrection(button) {
    * same correction from the durable ledger.
    */
   if (res.ok) {
-    if (noteInput) noteInput.value = "";
     cell.classList.add("source-corrected");
     addFeedbackConsoleItem({
       status: "captured",
@@ -2229,10 +2240,24 @@ async function saveDocxSourceCorrection(button) {
       route: payload.resolved ? JSON.stringify(payload.resolved).slice(0, 220) : "server rejected source correction",
     });
   }
-  setTimeout(() => { button.textContent = action === "reset" ? "reset" : action.replaceAll("_", " "); }, 1200);
+  if (button) setTimeout(() => { button.textContent = action === "reset" ? "reset" : action.replaceAll("_", " "); }, 1200);
   pollDocxReview();
+  pollMappingAudit();
   pollDashboardValidation("locked-docx-cell-drift-monitor");
   pollActivity();
+  return { ok: res.ok, payload };
+}
+
+async function saveDocxSourceCorrection(button) {
+  const cell = button.closest(".docx-cell");
+  if (!cell?.dataset.slotKey) return;
+  const action = button.dataset.correctionAction || "shift_next";
+  const noteInput = cell.querySelector(".docx-source-note");
+  const result = await postDocxSourceCorrection(cell, action, {
+    button,
+    note: noteInput?.value || "",
+  });
+  if (result?.ok && noteInput) noteInput.value = "";
 }
 
 function docxReviewCells() {
@@ -2877,6 +2902,13 @@ document.addEventListener("click", (event) => {
   if (docxSave) saveDocxReviewFeedback(docxSave, "reviewed");
   const docxSourceCorrection = event.target.closest(".docx-source-correct");
   if (docxSourceCorrection) saveDocxSourceCorrection(docxSourceCorrection);
+  const floatingSourceSave = event.target.closest(".save-floating-source-range");
+  if (floatingSourceSave) saveFloatingSourceSelection(floatingSourceSave);
+  const floatingSourceReset = event.target.closest(".reset-floating-source-selection");
+  if (floatingSourceReset) {
+    const preview = floatingSourceReset.closest(".floating-preview[data-source-picker='docx']");
+    resetPreviewSourceSelection(preview);
+  }
   const mappingAudit = event.target.closest("#runMappingAuditBtn");
   if (mappingAudit) pollMappingAudit(true);
   const docxLock = event.target.closest(".docx-lock");
@@ -3021,7 +3053,11 @@ async function hydrateHoverPreview(preview) {
     const strip = preview.querySelector(".neighbor-strip");
     let contextGroups = [];
     try { contextGroups = JSON.parse(strip.dataset.contextGroups || "[]"); } catch {}
-    const figures = (images) => images.map((image) => `<figure class="neighbor ${image.current ? "current" : ""}">
+    let currentSourceRefs = [];
+    try { currentSourceRefs = JSON.parse(preview.dataset.currentSourceRefs || "[]"); } catch {}
+    const selectedSources = new Set(currentSourceRefs);
+    const selectable = preview.dataset.sourcePicker === "docx";
+    const figures = (images) => images.map((image) => `<figure class="neighbor ${image.current ? "current" : ""} ${selectable ? "selectable" : ""} ${selectedSources.has(image.name) ? "selected-source" : ""}" data-image-name="${escapeHtml(image.name)}">
       <img src="${escapeHtml(image.href)}" alt="${escapeHtml(image.name)}" loading="lazy" decoding="async" fetchpriority="low" />
       <figcaption>${escapeHtml(image.name)}</figcaption>
     </figure>`).join("");
@@ -3051,6 +3087,7 @@ async function hydrateHoverPreview(preview) {
       </div>`);
     }
     strip.innerHTML = parts.join("");
+    if (selectable) initializePreviewSourceSelection(preview);
     requestAnimationFrame(() => {
       const current = strip.querySelector(".neighbor.current");
       if (current) {
@@ -3059,6 +3096,99 @@ async function hydrateHoverPreview(preview) {
       }
     });
   } catch {}
+}
+
+function previewSourceFigures(preview) {
+  return [...(preview?.querySelectorAll?.(".neighbor.selectable[data-image-name]") || [])];
+}
+
+function selectedPreviewSourceRefs(preview) {
+  return previewSourceFigures(preview)
+    .filter((figure) => figure.classList.contains("selected-source"))
+    .map((figure) => figure.dataset.imageName)
+    .filter(Boolean);
+}
+
+function updatePreviewSourceSelectionSummary(preview) {
+  const selected = selectedPreviewSourceRefs(preview);
+  const summary = preview?.querySelector?.(".source-picker-selection");
+  const save = preview?.querySelector?.(".save-floating-source-range");
+  if (summary) summary.textContent = selected.length ? selected.join(" -> ") : "No images selected";
+  if (save) save.disabled = !selected.length;
+}
+
+function setPreviewSourceSelection(preview, startName, endName = startName) {
+  const figures = previewSourceFigures(preview);
+  if (!figures.length || !startName) return;
+  const names = figures.map((figure) => figure.dataset.imageName);
+  const start = names.indexOf(startName);
+  const end = names.indexOf(endName || startName);
+  if (start < 0 || end < 0) return;
+  const low = Math.min(start, end);
+  const high = Math.max(start, end);
+  figures.forEach((figure, index) => {
+    figure.classList.toggle("selected-source", index >= low && index <= high);
+    figure.classList.toggle("range-edge", index === low || index === high);
+  });
+  preview.dataset.selectionStart = names[low];
+  preview.dataset.selectionEnd = names[high];
+  updatePreviewSourceSelectionSummary(preview);
+}
+
+function initializePreviewSourceSelection(preview) {
+  const figures = previewSourceFigures(preview);
+  if (!figures.length) return;
+  const selected = figures.filter((figure) => figure.classList.contains("selected-source"));
+  if (selected.length) {
+    setPreviewSourceSelection(preview, selected[0].dataset.imageName, selected.at(-1).dataset.imageName);
+  } else {
+    const current = figures.find((figure) => figure.classList.contains("current")) || figures[0];
+    setPreviewSourceSelection(preview, current.dataset.imageName);
+  }
+}
+
+function resetPreviewSourceSelection(preview) {
+  const figures = previewSourceFigures(preview);
+  if (!figures.length) return;
+  let current = [];
+  try { current = JSON.parse(preview.dataset.currentSourceRefs || "[]"); } catch {}
+  const currentSet = new Set(current);
+  figures.forEach((figure) => {
+    figure.classList.toggle("selected-source", currentSet.has(figure.dataset.imageName));
+    figure.classList.remove("range-edge");
+  });
+  initializePreviewSourceSelection(preview);
+}
+
+async function saveFloatingSourceSelection(button) {
+  const preview = button.closest(".floating-preview[data-source-picker='docx']");
+  const slotKey = preview?.dataset.sourcePickerSlotKey || "";
+  const cell = slotKey ? document.querySelector(`#docxReviewPanel .docx-cell[data-slot-key="${CSS.escape(slotKey)}"]`) : null;
+  if (!preview || !cell) {
+    addFeedbackConsoleItem({
+      status: "failed",
+      title: "Floating source selection",
+      value: slotKey || "missing slot",
+      route: "could not find the DOCX cell backing this preview",
+    });
+    return;
+  }
+  const selected = selectedPreviewSourceRefs(preview);
+  const note = preview.querySelector(".source-picker-note")?.value || "Saved from floating preview range picker";
+  if (!selected.length) {
+    updatePreviewSourceSelectionSummary(preview);
+    return;
+  }
+  const result = await postDocxSourceCorrection(cell, "set_explicit", {
+    button,
+    note,
+    newSourceRefs: selected,
+  });
+  if (result?.ok) {
+    const noteInput = preview.querySelector(".source-picker-note");
+    if (noteInput) noteInput.value = "";
+    preview.dataset.currentSourceRefs = JSON.stringify(selected);
+  }
 }
 
 function hideFloatingPreview() {
@@ -3121,10 +3251,32 @@ function showAnomalyFloatingPreview(chip, event) {
   const node = ensureAnomalyFloatingPreview();
   delete node.dataset.loaded;
   node.dataset.neighborhood = chip.dataset.neighborhood || "";
+  delete node.dataset.sourcePicker;
+  delete node.dataset.sourcePickerSlotKey;
+  delete node.dataset.currentSourceRefs;
+  const docxSourcePicker = chip.classList.contains("docx-cell") && chip.dataset.slotKey;
+  if (docxSourcePicker) {
+    node.dataset.sourcePicker = "docx";
+    node.dataset.sourcePickerSlotKey = chip.dataset.slotKey || "";
+    node.dataset.currentSourceRefs = chip.dataset.sourceRefs || "[]";
+  }
+  const sourcePickerControls = docxSourcePicker ? `<div class="source-picker-toolbar">
+      <div>
+        <strong>Correct evidence range</strong>
+        <span>drag across thumbnails, or shift-click from one image to another</span>
+      </div>
+      <div class="source-picker-actions">
+        <button class="small-btn save-floating-source-range" type="button">Save selected range</button>
+        <button class="small-btn reset-floating-source-selection" type="button">Reset selection</button>
+      </div>
+      <div class="source-picker-selection">Loading current source range</div>
+      <input class="source-picker-note" type="text" placeholder="optional note for this evidence-range correction" />
+    </div>` : "";
   node.innerHTML = `<div class="hover-current">
       <img data-src="${escapeHtml(chip.dataset.previewSrc)}" alt="${escapeHtml(chip.dataset.previewTitle || "validation evidence")}" decoding="async" fetchpriority="low" />
       <div>${escapeHtml(chip.dataset.previewTitle || "validation evidence")}</div>
     </div>
+    ${sourcePickerControls}
     <div class="neighbor-strip" data-context-groups="${escapeHtml(chip.dataset.contextGroups || "[]")}">
       <div class="neighbor-loading">hover: loading validation image context</div>
     </div>`;
@@ -3159,6 +3311,25 @@ document.addEventListener("mouseout", (event) => {
   const next = event.relatedTarget;
   if (next && (next.closest?.(".anomaly-chip") || next.closest?.(".docx-cell.has-preview") || next.closest?.(".floating-preview"))) return;
   scheduleFloatingPreviewHide();
+});
+document.addEventListener("pointerdown", (event) => {
+  const figure = event.target.closest?.(".floating-preview[data-source-picker='docx'] .neighbor.selectable[data-image-name]");
+  if (!figure) return;
+  const preview = figure.closest(".floating-preview");
+  event.preventDefault();
+  cancelFloatingPreviewHide();
+  const anchor = event.shiftKey && preview.dataset.selectionStart ? preview.dataset.selectionStart : figure.dataset.imageName;
+  previewSourceDrag = { preview, startName: anchor };
+  setPreviewSourceSelection(preview, anchor, figure.dataset.imageName);
+});
+document.addEventListener("pointerover", (event) => {
+  if (!previewSourceDrag) return;
+  const figure = event.target.closest?.(".floating-preview[data-source-picker='docx'] .neighbor.selectable[data-image-name]");
+  if (!figure || figure.closest(".floating-preview") !== previewSourceDrag.preview) return;
+  setPreviewSourceSelection(previewSourceDrag.preview, previewSourceDrag.startName, figure.dataset.imageName);
+});
+document.addEventListener("pointerup", () => {
+  previewSourceDrag = null;
 });
 window.addEventListener("resize", hideFloatingPreview, { passive: true });
 loadStructures();
